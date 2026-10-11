@@ -70,6 +70,66 @@ def test_admin_first_run_setup_and_auth_workflow(temp_admin_db):
     assert database.verify_admin_credentials(conn, "admin", "NewSuperSecure2026!")
 
 
+def test_emergency_admin_reset_script(temp_admin_db, monkeypatch):
+    """Test reset_admin.py command-line reset: old password fails and new one works."""
+    import reset_admin
+    conn, db_path = temp_admin_db
+
+    # Setup initial admin password
+    database.set_admin_password(conn, "admin", "OldPassword123")
+    assert database.verify_admin_credentials(conn, "admin", "OldPassword123")
+
+    # 1. Aborted reset when typed confirmation is wrong
+    monkeypatch.setattr("builtins.input", lambda prompt: "no")
+    monkeypatch.setattr("getpass.getpass", lambda prompt: "NewEmergencyPwd123")
+    assert not reset_admin.reset_password(username="admin", db_path=db_path)
+    # Old password still intact
+    assert database.verify_admin_credentials(conn, "admin", "OldPassword123")
+
+    # 2. Aborted reset when password mismatch
+    pw_sequence = iter(["NewEmergencyPwd123", "DifferentPwd123"])
+    monkeypatch.setattr("builtins.input", lambda prompt: "RESET")
+    monkeypatch.setattr("getpass.getpass", lambda prompt: next(pw_sequence))
+    assert not reset_admin.reset_password(username="admin", db_path=db_path)
+    assert database.verify_admin_credentials(conn, "admin", "OldPassword123")
+
+    # 3. Successful reset with 'RESET' confirmation and matching passwords (min 8 chars)
+    monkeypatch.setattr("builtins.input", lambda prompt: "RESET")
+    monkeypatch.setattr("getpass.getpass", lambda prompt: "BrandNewEmergency2026!")
+    success = reset_admin.reset_password(username="admin", db_path=db_path)
+    assert success
+
+    # Verify: after the reset, the old password fails and the new one works
+    assert not database.verify_admin_credentials(conn, "admin", "OldPassword123")
+    assert database.verify_admin_credentials(conn, "admin", "BrandNewEmergency2026!")
+
+
+def test_seed_flag_prevents_reseeding_after_table_emptied(temp_admin_db):
+    """Verify seed() runs only once: emptying departments table does not bring sample data back."""
+    conn, _ = temp_admin_db
+
+    # Database was seeded in fixture
+    assert conn.execute("SELECT COUNT(*) FROM departments").fetchone()[0] > 0
+    flag = conn.execute("SELECT value FROM settings WHERE key = 'seeded'").fetchone()
+    assert flag and flag[0] == "1"
+
+    # Admin removes all departments (e.g. to replace with custom hospital tariffs)
+    conn.execute("PRAGMA foreign_keys = OFF;")
+    conn.execute("DELETE FROM procedures;")
+    conn.execute("DELETE FROM doctors;")
+    conn.execute("DELETE FROM departments;")
+    conn.execute("PRAGMA foreign_keys = ON;")
+    conn.commit()
+
+    assert conn.execute("SELECT COUNT(*) FROM departments").fetchone()[0] == 0
+
+    # Call seed again (simulating application restart)
+    seed(conn)
+
+    # Verify seed does NOT bring back sample data because 'seeded' flag is preserved
+    assert conn.execute("SELECT COUNT(*) FROM departments").fetchone()[0] == 0
+
+
 # ==============================================================================
 # 2. Soft-Delete and Restore Tests (All Master Tables)
 # ==============================================================================
