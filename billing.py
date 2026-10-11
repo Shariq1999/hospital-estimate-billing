@@ -7,7 +7,9 @@ taxable item segregation, non-taxed contingency, and Indian Rupee (INR) formatti
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -17,17 +19,17 @@ ROUNDING = ROUND_HALF_UP
 
 
 def to_decimal(val: Any) -> Decimal:
-    """Safely convert any numeric, string or int value to Decimal."""
+    """
+    Safely convert numeric, string or int value to Decimal.
+    Raises ValueError or decimal.InvalidOperation on null, empty, or non-numeric input.
+    """
     if isinstance(val, Decimal):
         return val
     if val is None or val == "":
-        return Decimal("0.00")
+        raise ValueError("Value cannot be null or empty.")
     # Strip any existing commas or currency symbols
     cleaned = str(val).replace(",", "").replace("₹", "").strip()
-    try:
-        return Decimal(cleaned)
-    except Exception:
-        return Decimal("0.00")
+    return Decimal(cleaned)
 
 
 def quantize_money(val: Decimal) -> Decimal:
@@ -40,7 +42,10 @@ def format_inr(val: Any, show_symbol: bool = True) -> str:
     Format a Decimal amount into the Indian numbering system (e.g., ₹1,50,000.00).
     The last three digits are grouped together, and preceding digits in pairs of two.
     """
-    dec = quantize_money(to_decimal(val))
+    try:
+        dec = quantize_money(to_decimal(val))
+    except Exception:
+        dec = Decimal("0.00")
     s = str(dec)
     is_neg = s.startswith("-")
     if is_neg:
@@ -267,7 +272,7 @@ def calculate_estimate(
     line_items: List[LineItem] = []
 
     # 1. Room accommodation (if stay_days > 0 or explicitly 0 day care)
-    room_desc = f"{room_type.get('name', 'Room')} ({stay_days} day{'s' if stay_days != 1 else ''} @ ₹{daily_rate:,.2f}/day)"
+    room_desc = f"{room_type.get('name', 'Room')} ({stay_days} day{'s' if stay_days != 1 else ''} @ {format_inr(daily_rate)}/day)"
     if stay_days == 0:
         room_desc = f"{room_type.get('name', 'Room')} - Day Care (0 days stay)"
     line_items.append(
@@ -407,6 +412,7 @@ def calculate_estimate(
         validity_days=int(settings.get("validity_days", 15)),
         disclaimer_text=settings.get("disclaimer_text", ""),
         remarks=remarks.strip(),
+        created_at=datetime.now().isoformat(),
     )
 
 
@@ -415,14 +421,25 @@ def calculate_estimate(
 # ==============================================================================
 
 def validate_patient_name(name: str) -> Tuple[bool, str]:
-    """Validate patient name: non-blank, max 100 characters, valid format."""
+    """
+    Validate patient name: non-blank, max 100 characters.
+    Allows Unicode letters, combining marks, spaces, periods, apostrophes, hyphens, and slashes.
+    """
     if not name or not name.strip():
         return False, "Patient name cannot be blank."
     stripped = name.strip()
     if len(stripped) > 100:
         return False, "Patient name cannot exceed 100 characters."
-    if not re.match(r"^[A-Za-z\s\.\'\-]+$", stripped):
+    allowed_chars = set(" .'-/")
+    valid = all(
+        unicodedata.category(c)[0] in ("L", "M") or c.isspace() or c in allowed_chars
+        for c in stripped
+    )
+    if not valid:
         return False, "Patient name contains invalid characters."
+    has_letter = any(unicodedata.category(c)[0] == "L" for c in stripped)
+    if not has_letter:
+        return False, "Patient name must contain alphabetic characters."
     return True, ""
 
 

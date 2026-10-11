@@ -38,20 +38,14 @@ BOLD_FONT_PATH = os.path.join(FONT_DIR, "NotoSans-Bold.ttf")
 FONT_NAME = "NotoSans"
 BOLD_FONT_NAME = "NotoSans-Bold"
 
-try:
-    if os.path.exists(REGULAR_FONT_PATH):
-        pdfmetrics.registerFont(TTFont(FONT_NAME, REGULAR_FONT_PATH))
-    else:
-        FONT_NAME = "Helvetica"
+if not os.path.exists(REGULAR_FONT_PATH) or not os.path.exists(BOLD_FONT_PATH):
+    raise FileNotFoundError(
+        f"Required Noto Sans TTF fonts not found in {FONT_DIR}. "
+        "Please ensure NotoSans-Regular.ttf and NotoSans-Bold.ttf are committed in assets/fonts/."
+    )
 
-    if os.path.exists(BOLD_FONT_PATH):
-        pdfmetrics.registerFont(TTFont(BOLD_FONT_NAME, BOLD_FONT_PATH))
-    else:
-        BOLD_FONT_NAME = "Helvetica-Bold"
-except Exception as e:
-    # Graceful fallback to standard PDF fonts if TTF registration fails
-    FONT_NAME = "Helvetica"
-    BOLD_FONT_NAME = "Helvetica-Bold"
+pdfmetrics.registerFont(TTFont(FONT_NAME, REGULAR_FONT_PATH))
+pdfmetrics.registerFont(TTFont(BOLD_FONT_NAME, BOLD_FONT_PATH))
 
 
 def generate_estimate_pdf(
@@ -347,46 +341,52 @@ def generate_estimate_pdf(
             ]
         )
 
-    # Financial Totals Rows
+    # Financial Totals Rows - Spanning Columns 0-3 to prevent wrapping
+    totals_start_row = len(table_rows)
+
     subtotal_str = format_inr(fin.get("subtotal", 0))
-    table_rows.append(["", "", "", Paragraph("<b>Subtotal</b>", style_cell_bold), Paragraph(f"<b>{subtotal_str}</b>", style_cell_right_bold)])
+    table_rows.append([Paragraph("<b>Subtotal:</b>", style_cell_right_bold), "", "", "", Paragraph(f"<b>{subtotal_str}</b>", style_cell_right_bold)])
 
     disc_pct = Decimal(str(fin.get("discount_pct", "0")))
     if disc_pct > Decimal("0"):
         disc_amt_str = f"-{format_inr(fin.get('discount_amount', 0))}"
-        table_rows.append(["", "", "", Paragraph(f"Discount ({disc_pct}%)", style_cell), Paragraph(disc_amt_str, style_cell_right)])
+        table_rows.append([Paragraph(f"Discount ({disc_pct}%):", style_cell_right), "", "", "", Paragraph(disc_amt_str, style_cell_right)])
         net_str = format_inr(fin.get("net_base", 0))
-        table_rows.append(["", "", "", Paragraph("Net Base", style_cell), Paragraph(net_str, style_cell_right)])
+        table_rows.append([Paragraph("Net Base:", style_cell_right), "", "", "", Paragraph(net_str, style_cell_right)])
 
     cont_pct = fin.get("contingency_pct", "10")
     cont_amt_str = format_inr(fin.get("contingency_amount", 0))
-    table_rows.append(["", "", "", Paragraph(f"Contingency Buffer ({cont_pct}%)", style_cell), Paragraph(cont_amt_str, style_cell_right)])
+    table_rows.append([Paragraph(f"Contingency Buffer ({cont_pct}%):", style_cell_right), "", "", "", Paragraph(cont_amt_str, style_cell_right)])
 
     tax_pct = Decimal(str(fin.get("tax_pct", "0")))
     if tax_pct > Decimal("0"):
         tax_amt_str = format_inr(fin.get("tax_amount", 0))
-        table_rows.append(["", "", "", Paragraph(f"GST / Tax ({tax_pct}%)", style_cell), Paragraph(tax_amt_str, style_cell_right)])
+        table_rows.append([Paragraph(f"GST / Tax ({tax_pct}%):", style_cell_right), "", "", "", Paragraph(tax_amt_str, style_cell_right)])
 
     grand_total_str = format_inr(fin.get("total_amount", 0))
-    table_rows.append(["", "", "", Paragraph("<b>TOTAL ESTIMATE</b>", style_cell_bold), Paragraph(f"<b>{grand_total_str}</b>", style_cell_right_bold)])
+    table_rows.append([Paragraph("<b>TOTAL ESTIMATE:</b>", style_cell_right_bold), "", "", "", Paragraph(f"<b>{grand_total_str}</b>", style_cell_right_bold)])
+
+    totals_end_row = len(table_rows) - 1
 
     item_table = Table(table_rows, colWidths=[8 * mm, 80 * mm, 40 * mm, 18 * mm, 34 * mm])
-    item_table.setStyle(
-        TableStyle(
-            [
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2B6CB0")),
-                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-                ("GRID", (0, 0), (-1, len(line_items)), 0.5, colors.HexColor("#CBD5E0")),
-                ("TOPPADDING", (0, 0), (-1, -1), 4),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                ("LINEBELOW", (0, 0), (-1, 0), 1.5, colors.HexColor("#1A365D")),
-                # Highlight grand total row
-                ("BACKGROUND", (3, -1), (4, -1), colors.HexColor("#EBF8FF")),
-                ("BOX", (3, -1), (4, -1), 1, colors.HexColor("#2B6CB0")),
-            ]
-        )
-    )
+    t_styles = [
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2B6CB0")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("GRID", (0, 0), (-1, len(line_items)), 0.5, colors.HexColor("#CBD5E0")),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LINEBELOW", (0, 0), (-1, 0), 1.5, colors.HexColor("#1A365D")),
+        # Highlight grand total row
+        ("BACKGROUND", (0, totals_end_row), (-1, totals_end_row), colors.HexColor("#EBF8FF")),
+        ("BOX", (0, totals_end_row), (-1, totals_end_row), 1, colors.HexColor("#2B6CB0")),
+    ]
+    # Span columns 0-3 for all totals rows and right align
+    for r in range(totals_start_row, totals_end_row + 1):
+        t_styles.append(("SPAN", (0, r), (3, r)))
+        t_styles.append(("ALIGN", (0, r), (3, r), "RIGHT"))
+
+    item_table.setStyle(TableStyle(t_styles))
     story.append(item_table)
     story.append(Spacer(1, 4 * mm))
 

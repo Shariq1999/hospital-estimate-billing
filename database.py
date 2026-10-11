@@ -7,10 +7,12 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sqlite3
 import hashlib
 import hmac
 import secrets
+import tempfile
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -592,12 +594,21 @@ def get_estimate_by_number(conn: sqlite3.Connection, est_num: str) -> Optional[D
 # ==============================================================================
 
 def backup_database(conn: sqlite3.Connection) -> bytes:
-    """Create a hot backup of the SQLite database in memory and return bytes."""
-    dest_conn = sqlite3.connect(":memory:")
-    conn.backup(dest_conn)
-    # Extract in-memory DB as bytes
-    buffer = io.BytesIO()
-    for line in dest_conn.iterdump():
-        buffer.write(f"{line}\n".encode("utf-8"))
-    dest_conn.close()
-    return buffer.getvalue()
+    """Create a real binary SQLite database file backup and return its bytes."""
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
+        temp_path = tmp.name
+
+    try:
+        dest_conn = sqlite3.connect(temp_path)
+        conn.backup(dest_conn)
+        dest_conn.close()
+
+        with open(temp_path, "rb") as f:
+            data = f.read()
+        return data
+    finally:
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass

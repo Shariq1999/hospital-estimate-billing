@@ -265,8 +265,43 @@ def test_decimal_rounding_half_up():
     assert quantize_money(Decimal("0.005")) == Decimal("0.01")
 
 
+def test_to_decimal_raises_on_invalid_input():
+    """Verify that to_decimal raises on invalid, empty, or null inputs."""
+    with pytest.raises(Exception):
+        to_decimal("abc")
+
+    with pytest.raises(Exception):
+        to_decimal("")
+
+    with pytest.raises(Exception):
+        to_decimal(None)
+
+    with pytest.raises(Exception):
+        to_decimal("xyz123")
+
+    # Valid inputs should succeed
+    assert to_decimal("1500") == Decimal("1500")
+    assert to_decimal("₹25,000.50") == Decimal("25000.50")
+
+
+def test_validate_money_field_rejects_non_numeric():
+    """Verify that validate_money_field rejects 'abc' and negative values."""
+    valid, val, err = validate_money_field("abc", "Procedure Cost")
+    assert not valid
+    assert "Invalid number format" in err
+
+    valid, val, err = validate_money_field("-150.00", "OT Charge")
+    assert not valid
+    assert "cannot be negative" in err
+
+    valid, val, err = validate_money_field("4500.50", "Valid Charge")
+    assert valid
+    assert val == Decimal("4500.50")
+    assert err == ""
+
+
 def test_patient_name_validation():
-    """Test blank, whitespace, overly long, and valid patient names."""
+    """Test blank, whitespace, overly long, Unicode, and valid patient names."""
     # Blank
     valid, err = validate_patient_name("")
     assert not valid
@@ -282,12 +317,30 @@ def test_patient_name_validation():
     assert not valid
     assert "exceed 100 characters" in err
 
-    # Valid names
+    # Only numbers or punctuation (must contain letters)
+    valid, err = validate_patient_name("123456")
+    assert not valid
+
+    valid, err = validate_patient_name("---///...")
+    assert not valid
+
+    # Valid names with Unicode letters, dots, apostrophes, hyphens, and slashes
     valid, err = validate_patient_name("Dr. A. P. J. Abdul Kalam")
     assert valid
     assert err == ""
 
     valid, err = validate_patient_name("Rhea D'Souza-Smith")
+    assert valid
+
+    # Unicode letters (Hindi, French accents)
+    valid, err = validate_patient_name("डॉ. अमित शर्मा")
+    assert valid
+
+    valid, err = validate_patient_name("Sébastien Chabal")
+    assert valid
+
+    # Names with slashes (e.g., newborn notation)
+    valid, err = validate_patient_name("Baby of Sunita / Girl")
     assert valid
 
 

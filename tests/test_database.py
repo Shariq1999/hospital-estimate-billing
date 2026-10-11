@@ -168,7 +168,39 @@ def test_database_backup(temp_db):
 
     backup_bytes = database.backup_database(conn)
     assert len(backup_bytes) > 0
-    # Backup contains SQL dump text
-    assert b"CREATE TABLE" in backup_bytes
-    assert b"departments" in backup_bytes
-    assert b"Sample Multispeciality Hospital" in backup_bytes
+    # Must be a real binary SQLite 3 database file
+    assert backup_bytes.startswith(b"SQLite format 3\x00")
+
+
+def test_update_doctor(temp_db):
+    conn, _ = temp_db
+    seed(conn)
+
+    doctors = database.get_doctors(conn, active_only=True)
+    assert len(doctors) > 0
+    target_doc = doctors[0]
+    doc_id = target_doc["id"]
+
+    updated_name = "Dr. Arvind Menon Senior"
+    updated_fee = 2500
+    updated_pct = 55
+    updated_spec = "Senior Interventional Cardiologist"
+
+    res_id = database.save_doctor(
+        conn,
+        name=updated_name,
+        department_id=target_doc["department_id"],
+        consultation_fee=updated_fee,
+        surgeon_fee_pct=updated_pct,
+        specialization=updated_spec,
+        doc_id=doc_id,
+    )
+    assert res_id == doc_id
+
+    # Verify updated values in database
+    fetched = database.get_doctor_by_id(conn, doc_id)
+    assert fetched is not None
+    assert fetched["name"] == updated_name
+    assert fetched["consultation_fee"] == updated_fee
+    assert fetched["surgeon_fee_pct"] == updated_pct
+    assert fetched["specialization"] == updated_spec
