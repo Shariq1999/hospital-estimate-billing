@@ -37,9 +37,9 @@ def quantize_money(val: Decimal) -> Decimal:
     return val.quantize(CENTS, rounding=ROUNDING)
 
 
-def format_inr(val: Any, show_symbol: bool = True) -> str:
+def format_inr(val: Any, show_symbol: bool = True, whole_rupees: bool = False) -> str:
     """
-    Format a Decimal amount into the Indian numbering system (e.g., ₹1,50,000.00).
+    Format a Decimal amount into the Indian numbering system (e.g., ₹1,50,000.00 or ₹1,50,000).
     The last three digits are grouped together, and preceding digits in pairs of two.
     """
     try:
@@ -66,7 +66,10 @@ def format_inr(val: Any, show_symbol: bool = True) -> str:
         formatted_int = ",".join(groups) + "," + last3
 
     symbol = "₹" if show_symbol else ""
-    res = f"{symbol}{formatted_int}.{dec_part}"
+    if whole_rupees:
+        res = f"{symbol}{formatted_int}"
+    else:
+        res = f"{symbol}{formatted_int}.{dec_part}"
     return f"-{res}" if is_neg else res
 
 
@@ -272,7 +275,7 @@ def calculate_estimate(
     line_items: List[LineItem] = []
 
     # 1. Room accommodation (if stay_days > 0 or explicitly 0 day care)
-    room_desc = f"{room_type.get('name', 'Room')} ({stay_days} day{'s' if stay_days != 1 else ''} @ {format_inr(daily_rate)}/day)"
+    room_desc = f"{room_type.get('name', 'Room')} ({stay_days} day{'s' if stay_days != 1 else ''} @ {format_inr(daily_rate, whole_rupees=True)}/day)"
     if stay_days == 0:
         room_desc = f"{room_type.get('name', 'Room')} - Day Care (0 days stay)"
     line_items.append(

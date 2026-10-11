@@ -126,12 +126,18 @@ PROCEDURES = [
 
 
 def seed(conn: sqlite3.Connection) -> None:
-    """Insert seed rows. Safe to re-run: skips if departments already exist."""
+    """Insert seed rows. Safe to re-run: skips if seeded flag is set."""
     init_db(conn)
     cur = conn.cursor()
     cur.execute("PRAGMA foreign_keys = ON;")
 
+    row = cur.execute("SELECT value FROM settings WHERE key = 'seeded'").fetchone()
+    if row and row[0] == "1":
+        return
+
     if cur.execute("SELECT COUNT(*) FROM departments").fetchone()[0] > 0:
+        cur.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('seeded', '1')")
+        conn.commit()
         return
 
     for k, v in SETTINGS.items():
@@ -168,6 +174,7 @@ def seed(conn: sqlite3.Connection) -> None:
             (name, dept_ids[dept], base, ot, anaes, cons, inv, stay),
         )
 
+    cur.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('seeded', '1')")
     conn.commit()
 
 

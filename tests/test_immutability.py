@@ -56,7 +56,10 @@ def test_historical_estimate_immutability_guarantee(clean_db):
     original_line_count = len(res.line_items)
 
     est_num = database.get_next_estimate_number(conn)
+    # Set created_at via the application's save path before snapshot generation
+    fixed_created_at = "2026-05-15T14:30:00"
     res.estimate_number = est_num
+    res.created_at = fixed_created_at
     snapshot = res.to_snapshot_dict()
 
     save_data = {
@@ -77,6 +80,7 @@ def test_historical_estimate_immutability_guarantee(clean_db):
         "max_estimate": str(res.max_estimate),
         "line_items_json": snapshot,
         "remarks": res.remarks,
+        "created_at": fixed_created_at,
     }
     database.save_estimate(conn, save_data)
 
@@ -133,11 +137,15 @@ def test_historical_estimate_immutability_guarantee(clean_db):
     assert Decimal(retrieved_snapshot["financials"]["net_base"]) == original_net_base
     assert Decimal(retrieved_snapshot["financials"]["total_amount"]) == original_total
 
-    # Master doctor rates in snapshot remain frozen to original values
+    # Master doctor rates and date in snapshot remain frozen to original values
     assert retrieved_snapshot["clinical"]["surgeon_fee_pct"] == str(original_doc_fee_pct)
+    assert retrieved_snapshot["metadata"]["created_at"] == fixed_created_at
+    assert retrieved["created_at"] == fixed_created_at
 
-    # 5. Regenerate PDF from snapshot and verify byte output integrity
+    # 5. Regenerate PDF from snapshot and verify byte output integrity & date match
     reprinted_pdf = pdf_generator.generate_estimate_pdf(retrieved_snapshot, is_draft=False)
     assert len(reprinted_pdf) > 1000
-    # Both PDFs should be generated successfully and carry identical estimate number
+    # Both PDFs carry identical estimate number and exact historical date (15-May-2026)
     assert est_num.encode("utf-8") in reprinted_pdf
+    assert b"15-May-2026" in reprinted_pdf
+    assert b"30-May-2026" in reprinted_pdf

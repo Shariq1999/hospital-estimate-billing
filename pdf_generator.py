@@ -64,9 +64,25 @@ def generate_estimate_pdf(
 
     meta = data.get("metadata", {})
     est_num = meta.get("estimate_number") or ""
+    validity_days = int(meta.get("validity_days", 15))
+    created_at = meta.get("created_at") or data.get("patient", {}).get("created_at")
+
+    if created_at:
+        try:
+            dt = datetime.fromisoformat(created_at)
+            created_str = dt.strftime("%d-%b-%Y")
+            valid_until_str = (dt + timedelta(days=validity_days)).strftime("%d-%b-%Y")
+        except Exception:
+            created_str = str(created_at)[:10]
+            valid_until_str = f"Within {validity_days} days"
+    else:
+        dt = datetime.now()
+        created_str = dt.strftime("%d-%b-%Y")
+        valid_until_str = (dt + timedelta(days=validity_days)).strftime("%d-%b-%Y")
 
     buffer = io.BytesIO()
     doc_title = f"Hospital Cost Estimate - {'DRAFT - NOT SAVED' if is_draft or not est_num else est_num}"
+    doc_subject = f"Estimate Date: {created_str} | Valid Until: {valid_until_str}"
     doc = SimpleDocTemplate(
         buffer,
         pagesize=A4,
@@ -75,7 +91,7 @@ def generate_estimate_pdf(
         topMargin=15 * mm,
         bottomMargin=15 * mm,
         title=doc_title,
-        subject="Hospital Cost Estimate",
+        subject=doc_subject,
     )
 
     story: List[Any] = []
@@ -186,19 +202,7 @@ def generate_estimate_pdf(
     h_addr = meta.get("hospital_address") or ""
     h_phone = meta.get("hospital_phone") or ""
     h_email = meta.get("hospital_email") or ""
-    est_num = meta.get("estimate_number") or ""
-    created_at = meta.get("created_at") or datetime.now().strftime("%d-%b-%Y %I:%M %p")
-    validity_days = int(meta.get("validity_days", 15))
     disclaimer = meta.get("disclaimer_text") or ""
-
-    # Calculate valid until date
-    try:
-        dt = datetime.fromisoformat(created_at)
-        created_str = dt.strftime("%d-%b-%Y")
-        valid_until_str = (dt + timedelta(days=validity_days)).strftime("%d-%b-%Y")
-    except Exception:
-        created_str = datetime.now().strftime("%d-%b-%Y")
-        valid_until_str = (datetime.now() + timedelta(days=validity_days)).strftime("%d-%b-%Y")
 
     # 1. Header Section - Letterhead Placeholder
     placeholder_box = Table(

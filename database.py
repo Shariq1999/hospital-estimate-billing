@@ -5,6 +5,7 @@ transactional estimate counter, and PBKDF2 authentication.
 
 from __future__ import annotations
 
+import csv
 import io
 import json
 import os
@@ -15,6 +16,9 @@ import secrets
 import tempfile
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
+
+import pandas as pd
+import billing
 
 
 DB_FILE = "hospital.db"
@@ -248,12 +252,19 @@ def get_department_by_id(conn: sqlite3.Connection, dept_id: int) -> Optional[Dic
 
 
 def save_department(conn: sqlite3.Connection, name: str, dept_id: Optional[int] = None) -> int:
+    clean_name = name.strip()
+    dup = conn.execute(
+        "SELECT id FROM departments WHERE LOWER(name) = LOWER(?) AND id != ?",
+        (clean_name, dept_id or -1),
+    ).fetchone()
+    if dup:
+        raise sqlite3.IntegrityError(f"A department named '{clean_name}' already exists.")
     with conn:
         if dept_id:
-            conn.execute("UPDATE departments SET name = ? WHERE id = ?", (name, dept_id))
+            conn.execute("UPDATE departments SET name = ? WHERE id = ?", (clean_name, dept_id))
             return dept_id
         else:
-            cur = conn.execute("INSERT INTO departments (name, is_active) VALUES (?, 1)", (name,))
+            cur = conn.execute("INSERT INTO departments (name, is_active) VALUES (?, 1)", (clean_name,))
             return cur.lastrowid
 
 
@@ -284,17 +295,24 @@ def save_room_type(
     description: str,
     room_id: Optional[int] = None,
 ) -> int:
+    clean_name = name.strip()
+    dup = conn.execute(
+        "SELECT id FROM room_types WHERE LOWER(name) = LOWER(?) AND id != ?",
+        (clean_name, room_id or -1),
+    ).fetchone()
+    if dup:
+        raise sqlite3.IntegrityError(f"A room category named '{clean_name}' already exists.")
     with conn:
         if room_id:
             conn.execute(
                 "UPDATE room_types SET name = ?, daily_rate = ?, description = ? WHERE id = ?",
-                (name, daily_rate, description, room_id),
+                (clean_name, daily_rate, description.strip(), room_id),
             )
             return room_id
         else:
             cur = conn.execute(
                 "INSERT INTO room_types (name, daily_rate, description, is_active) VALUES (?, ?, ?, 1)",
-                (name, daily_rate, description),
+                (clean_name, daily_rate, description.strip()),
             )
             return cur.lastrowid
 
@@ -351,6 +369,13 @@ def save_doctor(
     specialization: str,
     doc_id: Optional[int] = None,
 ) -> int:
+    clean_name = name.strip()
+    dup = conn.execute(
+        "SELECT id FROM doctors WHERE LOWER(name) = LOWER(?) AND department_id = ? AND id != ?",
+        (clean_name, department_id, doc_id or -1),
+    ).fetchone()
+    if dup:
+        raise sqlite3.IntegrityError(f"A doctor named '{clean_name}' already exists in this department.")
     with conn:
         if doc_id:
             conn.execute(
@@ -360,7 +385,7 @@ def save_doctor(
                     surgeon_fee_pct = ?, specialization = ?
                 WHERE id = ?
                 """,
-                (name, department_id, consultation_fee, surgeon_fee_pct, specialization, doc_id),
+                (clean_name, department_id, consultation_fee, surgeon_fee_pct, specialization.strip(), doc_id),
             )
             return doc_id
         else:
@@ -369,7 +394,7 @@ def save_doctor(
                 INSERT INTO doctors (name, department_id, consultation_fee, surgeon_fee_pct, specialization, is_active)
                 VALUES (?, ?, ?, ?, ?, 1)
                 """,
-                (name, department_id, consultation_fee, surgeon_fee_pct, specialization),
+                (clean_name, department_id, consultation_fee, surgeon_fee_pct, specialization.strip()),
             )
             return cur.lastrowid
 
@@ -387,8 +412,8 @@ def get_procedures(
 ) -> List[Dict[str, Any]]:
     sql = """
         SELECT p.id, p.name, p.department_id, p.base_cost, p.ot_charge,
-               p.anaesthesia_charge, p.consumables_cost, p.investigations_charge,
-               p.default_stay_days, p.is_active, dep.name as department_name
+        anaesthesia_charge, consumables_cost, investigations_charge,
+        p.default_stay_days, p.is_active, dep.name as department_name
         FROM procedures p
         JOIN departments dep ON p.department_id = dep.id
         WHERE 1=1
@@ -431,6 +456,13 @@ def save_procedure(
     default_stay_days: int,
     proc_id: Optional[int] = None,
 ) -> int:
+    clean_name = name.strip()
+    dup = conn.execute(
+        "SELECT id FROM procedures WHERE LOWER(name) = LOWER(?) AND department_id = ? AND id != ?",
+        (clean_name, department_id, proc_id or -1),
+    ).fetchone()
+    if dup:
+        raise sqlite3.IntegrityError(f"A procedure named '{clean_name}' already exists in this department.")
     with conn:
         if proc_id:
             conn.execute(
@@ -442,7 +474,7 @@ def save_procedure(
                 WHERE id = ?
                 """,
                 (
-                    name, department_id, base_cost, ot_charge,
+                    clean_name, department_id, base_cost, ot_charge,
                     anaesthesia_charge, consumables_cost,
                     investigations_charge, default_stay_days, proc_id
                 ),
@@ -457,7 +489,7 @@ def save_procedure(
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
                 """,
                 (
-                    name, department_id, base_cost, ot_charge,
+                    clean_name, department_id, base_cost, ot_charge,
                     anaesthesia_charge, consumables_cost,
                     investigations_charge, default_stay_days
                 ),
@@ -612,3 +644,386 @@ def backup_database(conn: sqlite3.Connection) -> bytes:
                 os.remove(temp_path)
             except OSError:
                 pass
+
+
+# ==============================================================================
+# CSV Import / Export Helpers (Formula neutralization & All-or-Nothing Transactions)
+# ==============================================================================
+
+def sanitize_csv_cell(val: Any) -> str:
+    """Neutralize formula injection by prefixing with ' if string starts with =, +, -, @."""
+    s = str(val) if val is not None else ""
+    if s and s[0] in ("=", "+", "-", "@"):
+        return "'" + s
+    return s
+
+
+def unsanitize_csv_cell(val: Any) -> str:
+    """Remove leading single quote added to neutralize formula injection."""
+    s = str(val).strip() if val is not None else ""
+    if len(s) > 1 and s[0] == "'" and s[1] in ("=", "+", "-", "@"):
+        return s[1:]
+    return s
+
+
+def parse_is_active(val: Any) -> int:
+    """Parse is_active boolean or integer value."""
+    s = str(val).strip().lower()
+    if s in ("1", "true", "yes", "y", "active"):
+        return 1
+    elif s in ("0", "false", "no", "n", "inactive"):
+        return 0
+    return 1
+
+
+# --- Departments CSV ---
+
+def export_departments_csv(conn: sqlite3.Connection) -> bytes:
+    depts = get_departments(conn, active_only=False)
+    out = io.StringIO()
+    writer = csv.writer(out)
+    writer.writerow(["name", "is_active"])
+    for d in depts:
+        writer.writerow([sanitize_csv_cell(d["name"]), d["is_active"]])
+    return out.getvalue().encode("utf-8-sig")
+
+
+def import_departments_csv(conn: sqlite3.Connection, csv_data: str | bytes) -> Tuple[int, int]:
+    text = csv_data.decode("utf-8-sig") if isinstance(csv_data, bytes) else csv_data
+    reader = csv.DictReader(io.StringIO(text))
+    if not reader.fieldnames:
+        raise ValueError("CSV is empty or missing headers.")
+    col_map = {k.strip().lower(): k for k in reader.fieldnames if k}
+    if "name" not in col_map:
+        raise ValueError("CSV must contain a 'name' column.")
+
+    rows = list(reader)
+    if not rows:
+        raise ValueError("CSV contains no data rows.")
+
+    cleaned_rows: List[Tuple[str, int]] = []
+    for idx, r in enumerate(rows, start=1):
+        raw_name = unsanitize_csv_cell(r.get(col_map["name"], ""))
+        if not raw_name.strip():
+            raise ValueError(f"Row {idx}: Department name cannot be blank.")
+        active_val = 1
+        if "is_active" in col_map:
+            active_val = parse_is_active(unsanitize_csv_cell(r.get(col_map["is_active"], "1")))
+        cleaned_rows.append((raw_name.strip(), active_val))
+
+    inserted = 0
+    updated = 0
+    with conn:
+        for name, active_val in cleaned_rows:
+            existing = conn.execute(
+                "SELECT id FROM departments WHERE LOWER(name) = LOWER(?)", (name,)
+            ).fetchone()
+            if existing:
+                conn.execute(
+                    "UPDATE departments SET is_active = ? WHERE id = ?",
+                    (active_val, existing["id"]),
+                )
+                updated += 1
+            else:
+                conn.execute(
+                    "INSERT INTO departments (name, is_active) VALUES (?, ?)",
+                    (name, active_val),
+                )
+                inserted += 1
+    return inserted, updated
+
+
+# --- Room Types CSV ---
+
+def export_room_types_csv(conn: sqlite3.Connection) -> bytes:
+    rooms = get_room_types(conn, active_only=False)
+    out = io.StringIO()
+    writer = csv.writer(out)
+    writer.writerow(["name", "daily_rate", "description", "is_active"])
+    for r in rooms:
+        writer.writerow([
+            sanitize_csv_cell(r["name"]),
+            r["daily_rate"],
+            sanitize_csv_cell(r.get("description", "")),
+            r["is_active"],
+        ])
+    return out.getvalue().encode("utf-8-sig")
+
+
+def import_room_types_csv(conn: sqlite3.Connection, csv_data: str | bytes) -> Tuple[int, int]:
+    text = csv_data.decode("utf-8-sig") if isinstance(csv_data, bytes) else csv_data
+    reader = csv.DictReader(io.StringIO(text))
+    if not reader.fieldnames:
+        raise ValueError("CSV is empty or missing headers.")
+    col_map = {k.strip().lower(): k for k in reader.fieldnames if k}
+    for req in ("name", "daily_rate"):
+        if req not in col_map:
+            raise ValueError(f"CSV must contain a '{req}' column.")
+
+    rows = list(reader)
+    if not rows:
+        raise ValueError("CSV contains no data rows.")
+
+    cleaned_rows: List[Tuple[str, int, str, int]] = []
+    for idx, r in enumerate(rows, start=1):
+        raw_name = unsanitize_csv_cell(r.get(col_map["name"], ""))
+        if not raw_name.strip():
+            raise ValueError(f"Row {idx}: Room category name cannot be blank.")
+
+        raw_rate = unsanitize_csv_cell(r.get(col_map["daily_rate"], ""))
+        valid, rate_dec, err = billing.validate_money_field(raw_rate, "daily_rate", allow_zero=True)
+        if not valid:
+            raise ValueError(f"Row {idx}: {err}")
+
+        desc = ""
+        if "description" in col_map:
+            desc = unsanitize_csv_cell(r.get(col_map["description"], ""))
+
+        active_val = 1
+        if "is_active" in col_map:
+            active_val = parse_is_active(unsanitize_csv_cell(r.get(col_map["is_active"], "1")))
+
+        cleaned_rows.append((raw_name.strip(), int(rate_dec), desc.strip(), active_val))
+
+    inserted = 0
+    updated = 0
+    with conn:
+        for name, rate, desc, active_val in cleaned_rows:
+            existing = conn.execute(
+                "SELECT id FROM room_types WHERE LOWER(name) = LOWER(?)", (name,)
+            ).fetchone()
+            if existing:
+                conn.execute(
+                    "UPDATE room_types SET daily_rate = ?, description = ?, is_active = ? WHERE id = ?",
+                    (rate, desc, active_val, existing["id"]),
+                )
+                updated += 1
+            else:
+                conn.execute(
+                    "INSERT INTO room_types (name, daily_rate, description, is_active) VALUES (?, ?, ?, ?)",
+                    (name, rate, desc, active_val),
+                )
+                inserted += 1
+    return inserted, updated
+
+
+# --- Doctors CSV ---
+
+def export_doctors_csv(conn: sqlite3.Connection) -> bytes:
+    docs = get_doctors(conn, active_only=False)
+    out = io.StringIO()
+    writer = csv.writer(out)
+    writer.writerow(["name", "department", "consultation_fee", "surgeon_fee_pct", "specialization", "is_active"])
+    for d in docs:
+        writer.writerow([
+            sanitize_csv_cell(d["name"]),
+            sanitize_csv_cell(d["department_name"]),
+            d["consultation_fee"],
+            d["surgeon_fee_pct"],
+            sanitize_csv_cell(d.get("specialization", "")),
+            d["is_active"],
+        ])
+    return out.getvalue().encode("utf-8-sig")
+
+
+def import_doctors_csv(conn: sqlite3.Connection, csv_data: str | bytes) -> Tuple[int, int]:
+    text = csv_data.decode("utf-8-sig") if isinstance(csv_data, bytes) else csv_data
+    reader = csv.DictReader(io.StringIO(text))
+    if not reader.fieldnames:
+        raise ValueError("CSV is empty or missing headers.")
+    col_map = {k.strip().lower(): k for k in reader.fieldnames if k}
+    for req in ("name", "department", "consultation_fee", "surgeon_fee_pct"):
+        if req not in col_map:
+            raise ValueError(f"CSV must contain a '{req}' column.")
+
+    rows = list(reader)
+    if not rows:
+        raise ValueError("CSV contains no data rows.")
+
+    cleaned_rows: List[Tuple[str, int, int, int, str, int]] = []
+    for idx, r in enumerate(rows, start=1):
+        raw_name = unsanitize_csv_cell(r.get(col_map["name"], ""))
+        if not raw_name.strip():
+            raise ValueError(f"Row {idx}: Doctor name cannot be blank.")
+
+        raw_dept = unsanitize_csv_cell(r.get(col_map["department"], ""))
+        if not raw_dept.strip():
+            raise ValueError(f"Row {idx}: Department cannot be blank.")
+
+        dept_row = conn.execute(
+            "SELECT id FROM departments WHERE LOWER(name) = LOWER(?)", (raw_dept.strip(),)
+        ).fetchone()
+        if not dept_row:
+            raise ValueError(f"Row {idx}: Department '{raw_dept.strip()}' does not exist.")
+        dept_id = dept_row["id"]
+
+        raw_fee = unsanitize_csv_cell(r.get(col_map["consultation_fee"], ""))
+        valid, fee_dec, err = billing.validate_money_field(raw_fee, "consultation_fee", allow_zero=True)
+        if not valid:
+            raise ValueError(f"Row {idx}: {err}")
+
+        raw_pct = unsanitize_csv_cell(r.get(col_map["surgeon_fee_pct"], ""))
+        valid, pct_dec, err = billing.validate_percentage_field(raw_pct, "surgeon_fee_pct")
+        if not valid:
+            raise ValueError(f"Row {idx}: {err}")
+
+        spec = ""
+        if "specialization" in col_map:
+            spec = unsanitize_csv_cell(r.get(col_map["specialization"], ""))
+
+        active_val = 1
+        if "is_active" in col_map:
+            active_val = parse_is_active(unsanitize_csv_cell(r.get(col_map["is_active"], "1")))
+
+        cleaned_rows.append((raw_name.strip(), dept_id, int(fee_dec), int(pct_dec), spec.strip(), active_val))
+
+    inserted = 0
+    updated = 0
+    with conn:
+        for name, dept_id, fee, pct, spec, active_val in cleaned_rows:
+            existing = conn.execute(
+                "SELECT id FROM doctors WHERE LOWER(name) = LOWER(?) AND department_id = ?",
+                (name, dept_id),
+            ).fetchone()
+            if existing:
+                conn.execute(
+                    """
+                    UPDATE doctors
+                    SET consultation_fee = ?, surgeon_fee_pct = ?, specialization = ?, is_active = ?
+                    WHERE id = ?
+                    """,
+                    (fee, pct, spec, active_val, existing["id"]),
+                )
+                updated += 1
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO doctors (name, department_id, consultation_fee, surgeon_fee_pct, specialization, is_active)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (name, dept_id, fee, pct, spec, active_val),
+                )
+                inserted += 1
+    return inserted, updated
+
+
+# --- Procedures CSV ---
+
+def export_procedures_csv(conn: sqlite3.Connection) -> bytes:
+    procs = get_procedures(conn, active_only=False)
+    out = io.StringIO()
+    writer = csv.writer(out)
+    writer.writerow([
+        "name", "department", "base_cost", "ot_charge", "anaesthesia_charge",
+        "consumables_cost", "investigations_charge", "default_stay_days", "is_active"
+    ])
+    for p in procs:
+        writer.writerow([
+            sanitize_csv_cell(p["name"]),
+            sanitize_csv_cell(p["department_name"]),
+            p["base_cost"],
+            p["ot_charge"],
+            p["anaesthesia_charge"],
+            p["consumables_cost"],
+            p["investigations_charge"],
+            p["default_stay_days"],
+            p["is_active"],
+        ])
+    return out.getvalue().encode("utf-8-sig")
+
+
+def import_procedures_csv(conn: sqlite3.Connection, csv_data: str | bytes) -> Tuple[int, int]:
+    text = csv_data.decode("utf-8-sig") if isinstance(csv_data, bytes) else csv_data
+    reader = csv.DictReader(io.StringIO(text))
+    if not reader.fieldnames:
+        raise ValueError("CSV is empty or missing headers.")
+    col_map = {k.strip().lower(): k for k in reader.fieldnames if k}
+    required_cols = [
+        "name", "department", "base_cost", "ot_charge",
+        "anaesthesia_charge", "consumables_cost", "investigations_charge"
+    ]
+    for req in required_cols:
+        if req not in col_map:
+            raise ValueError(f"CSV must contain a '{req}' column.")
+
+    rows = list(reader)
+    if not rows:
+        raise ValueError("CSV contains no data rows.")
+
+    cleaned_rows = []
+    for idx, r in enumerate(rows, start=1):
+        raw_name = unsanitize_csv_cell(r.get(col_map["name"], ""))
+        if not raw_name.strip():
+            raise ValueError(f"Row {idx}: Procedure name cannot be blank.")
+
+        raw_dept = unsanitize_csv_cell(r.get(col_map["department"], ""))
+        if not raw_dept.strip():
+            raise ValueError(f"Row {idx}: Department cannot be blank.")
+
+        dept_row = conn.execute(
+            "SELECT id FROM departments WHERE LOWER(name) = LOWER(?)", (raw_dept.strip(),)
+        ).fetchone()
+        if not dept_row:
+            raise ValueError(f"Row {idx}: Department '{raw_dept.strip()}' does not exist.")
+        dept_id = dept_row["id"]
+
+        costs = {}
+        for c_field in ("base_cost", "ot_charge", "anaesthesia_charge", "consumables_cost", "investigations_charge"):
+            raw_c = unsanitize_csv_cell(r.get(col_map[c_field], ""))
+            valid, c_dec, err = billing.validate_money_field(raw_c, c_field, allow_zero=True)
+            if not valid:
+                raise ValueError(f"Row {idx}: {err}")
+            costs[c_field] = int(c_dec)
+
+        stay_val = 1
+        if "default_stay_days" in col_map:
+            raw_stay = unsanitize_csv_cell(r.get(col_map["default_stay_days"], "1"))
+            try:
+                stay_val = int(raw_stay)
+                if stay_val < 0:
+                    raise ValueError(f"Row {idx}: default_stay_days cannot be negative.")
+            except ValueError:
+                raise ValueError(f"Row {idx}: Invalid number format for default_stay_days.")
+
+        active_val = 1
+        if "is_active" in col_map:
+            active_val = parse_is_active(unsanitize_csv_cell(r.get(col_map["is_active"], "1")))
+
+        cleaned_rows.append((
+            raw_name.strip(), dept_id, costs["base_cost"], costs["ot_charge"],
+            costs["anaesthesia_charge"], costs["consumables_cost"],
+            costs["investigations_charge"], stay_val, active_val
+        ))
+
+    inserted = 0
+    updated = 0
+    with conn:
+        for (name, dept_id, base, ot, anaes, cons, inv, stay, active_val) in cleaned_rows:
+            existing = conn.execute(
+                "SELECT id FROM procedures WHERE LOWER(name) = LOWER(?) AND department_id = ?",
+                (name, dept_id),
+            ).fetchone()
+            if existing:
+                conn.execute(
+                    """
+                    UPDATE procedures
+                    SET base_cost = ?, ot_charge = ?, anaesthesia_charge = ?,
+                        consumables_cost = ?, investigations_charge = ?,
+                        default_stay_days = ?, is_active = ?
+                    WHERE id = ?
+                    """,
+                    (base, ot, anaes, cons, inv, stay, active_val, existing["id"]),
+                )
+                updated += 1
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO procedures (
+                        name, department_id, base_cost, ot_charge, anaesthesia_charge,
+                        consumables_cost, investigations_charge, default_stay_days, is_active
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (name, dept_id, base, ot, anaes, cons, inv, stay, active_val),
+                )
+                inserted += 1
+    return inserted, updated
