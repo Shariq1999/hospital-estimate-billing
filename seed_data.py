@@ -37,6 +37,13 @@ SETTINGS = {
         "additional investigations or procedures, and implants/consumables "
         "actually used. This estimate is not a final bill."
     ),
+    "tax_category_room": "0",
+    "tax_category_procedure": "0",
+    "tax_category_surgeon": "0",
+    "tax_category_ot": "0",
+    "tax_category_anaesthesia": "0",
+    "tax_category_consumables": "0",
+    "tax_category_investigations": "0",
 }
 
 # ------------------------------------------------------------- room types

@@ -5,13 +5,10 @@ soft delete / restore operations, duplicate-name IntegrityErrors,
 formula-neutralized CSV import/export with BOM, and atomic rollback on invalid data.
 """
 
-import io
 import os
 import sqlite3
 import pytest
-from decimal import Decimal
 
-import billing
 import database
 from seed_data import seed, DEPARTMENTS, ROOM_TYPES, DOCTORS, PROCEDURES
 
@@ -71,7 +68,7 @@ def test_admin_first_run_setup_and_auth_workflow(temp_admin_db):
 
 
 def test_emergency_admin_reset_script(temp_admin_db, monkeypatch):
-    """Test reset_admin.py command-line reset: old password fails and new one works."""
+    """Test reset_admin.py command-line reset: old password fails, new one works, file checks."""
     import reset_admin
     conn, db_path = temp_admin_db
 
@@ -79,21 +76,28 @@ def test_emergency_admin_reset_script(temp_admin_db, monkeypatch):
     database.set_admin_password(conn, "admin", "OldPassword123")
     assert database.verify_admin_credentials(conn, "admin", "OldPassword123")
 
-    # 1. Aborted reset when typed confirmation is wrong
+    # 1. Abort if database file does not exist
+    non_existent_db = db_path + ".missing"
+    assert not reset_admin.reset_password(username="admin", db_path=non_existent_db)
+
+    # 2. Abort if user does not exist (never create a new account)
+    assert not reset_admin.reset_password(username="ghost_user", db_path=db_path)
+
+    # 3. Aborted reset when typed confirmation is wrong
     monkeypatch.setattr("builtins.input", lambda prompt: "no")
     monkeypatch.setattr("getpass.getpass", lambda prompt: "NewEmergencyPwd123")
     assert not reset_admin.reset_password(username="admin", db_path=db_path)
     # Old password still intact
     assert database.verify_admin_credentials(conn, "admin", "OldPassword123")
 
-    # 2. Aborted reset when password mismatch
+    # 4. Aborted reset when password mismatch
     pw_sequence = iter(["NewEmergencyPwd123", "DifferentPwd123"])
     monkeypatch.setattr("builtins.input", lambda prompt: "RESET")
     monkeypatch.setattr("getpass.getpass", lambda prompt: next(pw_sequence))
     assert not reset_admin.reset_password(username="admin", db_path=db_path)
     assert database.verify_admin_credentials(conn, "admin", "OldPassword123")
 
-    # 3. Successful reset with 'RESET' confirmation and matching passwords (min 8 chars)
+    # 5. Successful reset with 'RESET' confirmation and matching passwords (min 8 chars)
     monkeypatch.setattr("builtins.input", lambda prompt: "RESET")
     monkeypatch.setattr("getpass.getpass", lambda prompt: "BrandNewEmergency2026!")
     success = reset_admin.reset_password(username="admin", db_path=db_path)
@@ -414,3 +418,35 @@ def test_csv_import_empty_raises_error(temp_admin_db):
         database.import_departments_csv(conn, "")
 
     assert "missing headers" in str(excinfo.value)
+
+
+def test_csv_import_rejection_non_whole_rupees_and_fractional_percentages(temp_admin_db):
+    """Test rejection of non-whole rupee amounts (paise/decimals) and fractional surgeon percentages."""
+    conn, _ = temp_admin_db
+
+    # 1. Non-whole rupee rate in room import
+    bad_room_csv = (
+        "name,daily_rate,description,is_active\n"
+        "Fractional Room,5500.50,Decimal room,1\n"
+    )
+    with pytest.raises(ValueError) as exc1:
+        database.import_room_types_csv(conn, bad_room_csv)
+    assert "must be a whole rupee amount (columns are whole rupees)" in str(exc1.value)
+
+    # 2. Fractional surgeon fee percentage in doctor import
+    bad_doc_csv = (
+        "name,department,consultation_fee,surgeon_fee_pct,specialization,is_active\n"
+        "Dr. Fractional,Cardiology,1500,42.5,Cardiologist,1\n"
+    )
+    with pytest.raises(ValueError) as exc2:
+        database.import_doctors_csv(conn, bad_doc_csv)
+    assert "fractional percentages not allowed" in str(exc2.value)
+
+    # 3. Non-whole rupee base cost in procedure import
+    bad_proc_csv = (
+        "name,department,base_cost,ot_charge,anaesthesia_charge,consumables_cost,investigations_charge,default_stay_days,is_active\n"
+        "Decimal Proc,Cardiology,90000.75,35000,15000,160000,10000,3,1\n"
+    )
+    with pytest.raises(ValueError) as exc3:
+        database.import_procedures_csv(conn, bad_proc_csv)
+    assert "must be a whole rupee amount (columns are whole rupees)" in str(exc3.value)

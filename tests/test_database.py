@@ -4,7 +4,6 @@ transactional counter, PBKDF2 authentication, and soft deletes.
 """
 
 import os
-import sqlite3
 import pytest
 from datetime import datetime
 

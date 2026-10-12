@@ -86,6 +86,7 @@ def test_historical_estimate_immutability_guarantee(clean_db):
 
     # Generate original PDF bytes
     orig_pdf = pdf_generator.generate_estimate_pdf(snapshot, is_draft=False)
+    assert len(orig_pdf) > 1000
 
     # 3. Drastically modify master tables (price hikes)
     # Double the room rate

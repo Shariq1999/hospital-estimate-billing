@@ -9,12 +9,13 @@ import io
 import os
 from decimal import Decimal
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
+from xml.sax.saxutils import escape as xml_escape
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-from reportlab.lib.units import inch, mm
+from reportlab.lib.units import mm
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import (
@@ -198,11 +199,11 @@ def generate_estimate_pdf(
     fin = data.get("financials", {})
     line_items = data.get("line_items", [])
 
-    h_name = meta.get("hospital_name") or "Sample Multispeciality Hospital"
-    h_addr = meta.get("hospital_address") or ""
-    h_phone = meta.get("hospital_phone") or ""
-    h_email = meta.get("hospital_email") or ""
-    disclaimer = meta.get("disclaimer_text") or ""
+    h_name = xml_escape(str(meta.get("hospital_name") or "Sample Multispeciality Hospital"))
+    h_addr = xml_escape(str(meta.get("hospital_address") or ""))
+    h_phone = xml_escape(str(meta.get("hospital_phone") or ""))
+    h_email = xml_escape(str(meta.get("hospital_email") or ""))
+    disclaimer = xml_escape(str(meta.get("disclaimer_text") or ""))
 
     # 1. Header Section - Letterhead Placeholder
     placeholder_box = Table(
@@ -264,23 +265,31 @@ def generate_estimate_pdf(
     story.append(Spacer(1, 4 * mm))
 
     # 3. Patient & Clinical Metadata Grid
+    p_name = xml_escape(str(patient.get("name", "N/A")))
+    dept_name = xml_escape(str(clinical.get("department", "N/A")))
+    proc_name = xml_escape(str(clinical.get("procedure", "N/A")))
+    doc_name = xml_escape(str(clinical.get("doctor", "N/A")))
+    room_name = xml_escape(str(clinical.get("room_type", "N/A")))
+    remarks_raw = patient.get("remarks")
+    remarks_val = xml_escape(str(remarks_raw)) if remarks_raw else ""
+
     patient_info = [
         [
             Paragraph("<b>Patient Name:</b>", style_cell_bold),
-            Paragraph(patient.get("name", "N/A"), style_cell),
+            Paragraph(p_name, style_cell),
             Paragraph("<b>Department:</b>", style_cell_bold),
-            Paragraph(clinical.get("department", "N/A"), style_cell),
+            Paragraph(dept_name, style_cell),
         ],
         [
             Paragraph("<b>Scheduled Procedure:</b>", style_cell_bold),
-            Paragraph(clinical.get("procedure", "N/A"), style_cell),
+            Paragraph(proc_name, style_cell),
             Paragraph("<b>Primary Doctor/Surgeon:</b>", style_cell_bold),
-            Paragraph(clinical.get("doctor", "N/A"), style_cell),
+            Paragraph(doc_name, style_cell),
         ],
         [
             Paragraph("<b>Room Accommodation:</b>", style_cell_bold),
             Paragraph(
-                f"{clinical.get('room_type', 'N/A')} (@ {format_inr(clinical.get('room_daily_rate', 0))}/day)",
+                f"{room_name} (@ {format_inr(clinical.get('room_daily_rate', 0))}/day)",
                 style_cell,
             ),
             Paragraph("<b>Estimated Stay:</b>", style_cell_bold),
@@ -291,11 +300,11 @@ def generate_estimate_pdf(
             ),
         ],
     ]
-    if patient.get("remarks"):
+    if remarks_val:
         patient_info.append(
             [
                 Paragraph("<b>Clinical Remarks:</b>", style_cell_bold),
-                Paragraph(patient.get("remarks", ""), style_cell),
+                Paragraph(remarks_val, style_cell),
                 "",
                 "",
             ]
@@ -316,7 +325,7 @@ def generate_estimate_pdf(
             ]
         )
     )
-    if patient.get("remarks"):
+    if remarks_val:
         patient_table.setStyle(TableStyle([("SPAN", (1, 3), (3, 3))]))
     story.append(patient_table)
     story.append(Spacer(1, 5 * mm))
@@ -335,11 +344,13 @@ def generate_estimate_pdf(
     for idx, item in enumerate(line_items, start=1):
         is_tax = "Yes" if item.get("is_taxable") else "No"
         amt_str = format_inr(item.get("amount", 0))
+        cat_val = xml_escape(str(item.get("category", "")))
+        desc_val = xml_escape(str(item.get("description", "")))
         table_rows.append(
             [
                 Paragraph(str(idx), style_cell),
-                Paragraph(f"<b>{item.get('category')}</b><br/>{item.get('description')}", style_cell),
-                Paragraph(item.get("category", ""), style_cell),
+                Paragraph(f"<b>{cat_val}</b><br/>{desc_val}", style_cell),
+                Paragraph(cat_val, style_cell),
                 Paragraph(is_tax, style_cell),
                 Paragraph(amt_str, style_cell_right),
             ]

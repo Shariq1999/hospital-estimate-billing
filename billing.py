@@ -6,9 +6,8 @@ taxable item segregation, non-taxed contingency, and Indian Rupee (INR) formatti
 
 from __future__ import annotations
 
-import re
 import unicodedata
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Dict, List, Optional, Tuple
@@ -228,6 +227,31 @@ def allocate_discount(
     return total_discount, net_base
 
 
+TAXABLE_CATEGORY_KEYS = {
+    "Room Accommodation": "tax_category_room",
+    "Hospital Procedure Tariff": "tax_category_procedure",
+    "Surgeon Professional Fee": "tax_category_surgeon",
+    "Operation Theatre Charges": "tax_category_ot",
+    "Anaesthesia Charges": "tax_category_anaesthesia",
+    "Surgical Consumables & Implants": "tax_category_consumables",
+    "Investigations & Diagnostics": "tax_category_investigations",
+}
+
+
+def is_category_taxable(category_name: str, settings: Optional[Dict[str, Any]] = None) -> bool:
+    """
+    Check if a line item category is taxable according to settings.
+    Default: False (nothing taxable).
+    """
+    if not settings:
+        return False
+    key = TAXABLE_CATEGORY_KEYS.get(category_name)
+    if not key:
+        return False
+    val = str(settings.get(key, "0")).strip().lower()
+    return val in ("1", "true", "yes")
+
+
 def calculate_estimate(
     patient_name: str,
     stay_days: int,
@@ -285,7 +309,7 @@ def calculate_estimate(
             quantity=Decimal(stay_days),
             unit_price=daily_rate,
             amount=room_charges,
-            is_taxable=False,
+            is_taxable=is_category_taxable("Room Accommodation", settings),
         )
     )
 
@@ -297,7 +321,7 @@ def calculate_estimate(
             quantity=Decimal(1),
             unit_price=proc_base,
             amount=proc_base,
-            is_taxable=False,
+            is_taxable=is_category_taxable("Hospital Procedure Tariff", settings),
         )
     )
 
@@ -309,7 +333,7 @@ def calculate_estimate(
             quantity=Decimal(1),
             unit_price=surgeon_fee,
             amount=surgeon_fee,
-            is_taxable=False,
+            is_taxable=is_category_taxable("Surgeon Professional Fee", settings),
         )
     )
 
@@ -321,7 +345,7 @@ def calculate_estimate(
             quantity=Decimal(1),
             unit_price=ot_charge,
             amount=ot_charge,
-            is_taxable=False,
+            is_taxable=is_category_taxable("Operation Theatre Charges", settings),
         )
     )
 
@@ -333,11 +357,11 @@ def calculate_estimate(
             quantity=Decimal(1),
             unit_price=anaes_charge,
             amount=anaes_charge,
-            is_taxable=False,
+            is_taxable=is_category_taxable("Anaesthesia Charges", settings),
         )
     )
 
-    # 6. Surgical Consumables & Implants (Taxable)
+    # 6. Surgical Consumables & Implants
     line_items.append(
         LineItem(
             category="Surgical Consumables & Implants",
@@ -345,11 +369,11 @@ def calculate_estimate(
             quantity=Decimal(1),
             unit_price=consumables,
             amount=consumables,
-            is_taxable=True,
+            is_taxable=is_category_taxable("Surgical Consumables & Implants", settings),
         )
     )
 
-    # 7. Diagnostic & Lab Investigations (Taxable)
+    # 7. Diagnostic & Lab Investigations
     line_items.append(
         LineItem(
             category="Investigations & Diagnostics",
@@ -357,7 +381,7 @@ def calculate_estimate(
             quantity=Decimal(1),
             unit_price=investigations,
             amount=investigations,
-            is_taxable=True,
+            is_taxable=is_category_taxable("Investigations & Diagnostics", settings),
         )
     )
 
@@ -477,3 +501,31 @@ def validate_department_availability(doctors: List[Any], procedures: List[Any]) 
     if not procedures:
         return False, "Selected department has no active procedures configured."
     return True, ""
+
+
+def validate_whole_rupee_field(val: Any, field_name: str, allow_zero: bool = True) -> Tuple[bool, int, str]:
+    """Validate that value is a non-negative whole rupee integer amount (no decimals or paise)."""
+    try:
+        dec = to_decimal(val)
+        if dec < Decimal("0"):
+            return False, 0, f"{field_name} cannot be negative."
+        if not allow_zero and dec == Decimal("0"):
+            return False, 0, f"{field_name} must be greater than zero."
+        if dec != dec.to_integral_value():
+            return False, 0, f"{field_name} must be a whole rupee amount (columns are whole rupees)."
+        return True, int(dec), ""
+    except Exception:
+        return False, 0, f"Invalid number format for {field_name}."
+
+
+def validate_whole_percentage_field(val: Any, field_name: str, min_pct: int = 0, max_pct: int = 100) -> Tuple[bool, int, str]:
+    """Validate that percentage is an integer within [min_pct, max_pct] (no fractional percentages)."""
+    try:
+        dec = to_decimal(val)
+        if dec < Decimal(str(min_pct)) or dec > Decimal(str(max_pct)):
+            return False, 0, f"{field_name} must be between {min_pct}% and {max_pct}%."
+        if dec != dec.to_integral_value():
+            return False, 0, f"{field_name} must be a whole percentage (fractional percentages not allowed; columns are whole rupees)."
+        return True, int(dec), ""
+    except Exception:
+        return False, 0, f"Invalid percentage format for {field_name}."

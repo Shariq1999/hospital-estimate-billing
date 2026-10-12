@@ -17,7 +17,6 @@ import tempfile
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-import pandas as pd
 import billing
 
 
@@ -771,7 +770,7 @@ def import_room_types_csv(conn: sqlite3.Connection, csv_data: str | bytes) -> Tu
             raise ValueError(f"Row {idx}: Room category name cannot be blank.")
 
         raw_rate = unsanitize_csv_cell(r.get(col_map["daily_rate"], ""))
-        valid, rate_dec, err = billing.validate_money_field(raw_rate, "daily_rate", allow_zero=True)
+        valid, rate_dec, err = billing.validate_whole_rupee_field(raw_rate, "daily_rate", allow_zero=True)
         if not valid:
             raise ValueError(f"Row {idx}: {err}")
 
@@ -858,12 +857,12 @@ def import_doctors_csv(conn: sqlite3.Connection, csv_data: str | bytes) -> Tuple
         dept_id = dept_row["id"]
 
         raw_fee = unsanitize_csv_cell(r.get(col_map["consultation_fee"], ""))
-        valid, fee_dec, err = billing.validate_money_field(raw_fee, "consultation_fee", allow_zero=True)
+        valid, fee_dec, err = billing.validate_whole_rupee_field(raw_fee, "consultation_fee", allow_zero=True)
         if not valid:
             raise ValueError(f"Row {idx}: {err}")
 
         raw_pct = unsanitize_csv_cell(r.get(col_map["surgeon_fee_pct"], ""))
-        valid, pct_dec, err = billing.validate_percentage_field(raw_pct, "surgeon_fee_pct")
+        valid, pct_dec, err = billing.validate_whole_percentage_field(raw_pct, "surgeon_fee_pct")
         if not valid:
             raise ValueError(f"Row {idx}: {err}")
 
@@ -970,7 +969,7 @@ def import_procedures_csv(conn: sqlite3.Connection, csv_data: str | bytes) -> Tu
         costs = {}
         for c_field in ("base_cost", "ot_charge", "anaesthesia_charge", "consumables_cost", "investigations_charge"):
             raw_c = unsanitize_csv_cell(r.get(col_map[c_field], ""))
-            valid, c_dec, err = billing.validate_money_field(raw_c, c_field, allow_zero=True)
+            valid, c_dec, err = billing.validate_whole_rupee_field(raw_c, c_field, allow_zero=True)
             if not valid:
                 raise ValueError(f"Row {idx}: {err}")
             costs[c_field] = int(c_dec)

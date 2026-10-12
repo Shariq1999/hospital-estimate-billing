@@ -6,7 +6,6 @@ per-line discount allocation, tax/contingency ordering, and boundary edge cases.
 from decimal import Decimal
 import pytest
 
-import billing
 from billing import (
     LineItem,
     allocate_discount,
@@ -17,7 +16,8 @@ from billing import (
     validate_department_availability,
     validate_money_field,
     validate_patient_name,
-    validate_percentage_field,
+    validate_whole_percentage_field,
+    validate_whole_rupee_field,
 )
 
 
@@ -161,6 +161,7 @@ def test_per_line_discount_allocation_and_leftover_paise():
     ]
 
     total_gross = sum(i.amount for i in items)  # 166.66
+    assert total_gross == Decimal("166.66")
     discount_pct = Decimal("15.0")  # 15% of 166.66 = 24.999 -> rounds to 25.00
 
     tot_disc, net_base = allocate_discount(items, discount_pct)
@@ -207,6 +208,8 @@ def test_tax_and_contingency_rules():
         "tax_rate": "18.0",       # 18% GST
         "contingency_rate": "10.0",# 10%
         "estimate_range_pct": "5.0",
+        "tax_category_consumables": "1",
+        "tax_category_investigations": "1",
     }
 
     # Gross calculations:
@@ -409,3 +412,272 @@ def test_snapshot_json_structure():
     assert len(snap["line_items"]) == 7
     assert snap["financials"]["subtotal"] == str(res.subtotal)
     assert snap["financials"]["total_amount"] == str(res.total_amount)
+
+
+def test_pdf_generation_escapes_xml_special_characters():
+    """Verify remarks with '<b', '<i>', '</b>' and hospital with '<' are escaped and PDF generates safely."""
+    import pdf_generator
+    room = {"name": "Single Private Room", "daily_rate": 5500}
+    doc = {"name": "Dr. Sanjay Deshmukh", "surgeon_fee_pct": 50}
+    proc = {
+        "name": "Total Knee Replacement",
+        "base_cost": 90000,
+        "ot_charge": 35000,
+        "anaesthesia_charge": 15000,
+        "consumables_cost": 160000,
+        "investigations_charge": 10000,
+        "default_stay_days": 5,
+    }
+    dept = {"name": "Orthopaedics"}
+    settings = {
+        "hospital_name": "Smith & Sons <Clinic",
+        "hospital_address": "42 High St & Medical Block",
+        "tax_rate": "0",
+        "contingency_rate": "10",
+        "estimate_range_pct": "10",
+        "validity_days": "15",
+        "disclaimer_text": "Disclaimer with <special> & characters.",
+    }
+
+    # Test remarks containing 'BP <b', 'x <i>y', 'a </b> b'
+    dangerous_remarks = "BP <b; x <i>y; a </b> b"
+    res = calculate_estimate(
+        patient_name="John Doe & Family",
+        stay_days=5,
+        room_type=room,
+        doctor=doc,
+        procedure=proc,
+        department=dept,
+        discount_pct=0,
+        settings=settings,
+        remarks=dangerous_remarks,
+    )
+    res.estimate_number = "EST-20261011-9999"
+
+    # Should generate without any XML parsing errors
+    pdf_bytes = pdf_generator.generate_estimate_pdf(res, is_draft=False)
+    assert len(pdf_bytes) > 1000
+    assert pdf_bytes.startswith(b"%PDF")
+
+
+def test_validate_whole_rupee_and_whole_percentage_fields():
+    """Verify validation of whole rupee integer amounts and whole percentages with clear error messages."""
+    # Whole rupee checks
+    v, val, err = validate_whole_rupee_field("5000", "Daily Rate")
+    assert v and val == 5000 and not err
+
+    v, val, err = validate_whole_rupee_field(5000, "Daily Rate")
+    assert v and val == 5000 and not err
+
+    v, _, err = validate_whole_rupee_field("5000.50", "Daily Rate")
+    assert not v and "columns are whole rupees" in err
+
+    v, _, err = validate_whole_rupee_field("-100", "Daily Rate")
+    assert not v and "cannot be negative" in err
+
+    v, _, err = validate_whole_rupee_field("abc", "Daily Rate")
+    assert not v and "Invalid number format" in err
+
+    # Whole percentage checks
+    v, val, err = validate_whole_percentage_field("40", "Surgeon Fee")
+    assert v and val == 40 and not err
+
+    v, _, err = validate_whole_percentage_field("40.5", "Surgeon Fee")
+    assert not v and "fractional percentages not allowed" in err
+
+    v, _, err = validate_whole_percentage_field("150", "Surgeon Fee")
+    assert not v and "must be between" in err
+
+    v, _, err = validate_whole_percentage_field("-5", "Surgeon Fee")
+    assert not v and "must be between" in err
+
+
+def test_tax_default_nothing_taxable():
+    """Verify that by default (no taxable flags configured in settings), nothing is taxable."""
+    room = {"name": "Single Private Room", "daily_rate": 5500}
+    doc = {"name": "Dr. Prakash Nair", "surgeon_fee_pct": 40}
+    proc = {
+        "name": "Appendectomy",
+        "base_cost": 30000,
+        "ot_charge": 15000,
+        "anaesthesia_charge": 7000,
+        "consumables_cost": 15000,
+        "investigations_charge": 5000,
+        "default_stay_days": 2,
+    }
+    dept = {"name": "General Surgery"}
+    settings = {
+        "tax_rate": "18.0",
+        "contingency_rate": "10.0",
+        "estimate_range_pct": "5.0",
+        # No tax_category_* flags provided -> defaults to nothing taxable
+    }
+
+    res = calculate_estimate(
+        patient_name="Rahul Verma",
+        stay_days=2,
+        room_type=room,
+        doctor=doc,
+        procedure=proc,
+        department=dept,
+        discount_pct=0,
+        settings=settings,
+    )
+
+    assert res.taxable_base == Decimal("0.00")
+    assert res.tax_amount == Decimal("0.00")
+
+
+def test_pdf_text_extraction_and_inr_glyphs():
+    """Verify that generated PDF binary contains Noto Sans fonts, INR glyph mappings, and rendered text."""
+    import base64
+    import re
+    import zlib
+    import pdf_generator
+
+    room = {"name": "Single Private Room", "daily_rate": 5500}
+    doc = {"name": "Dr. Sanjay Deshmukh", "surgeon_fee_pct": 50}
+    proc = {
+        "name": "Total Knee Replacement",
+        "base_cost": 90000,
+        "ot_charge": 35000,
+        "anaesthesia_charge": 15000,
+        "consumables_cost": 160000,
+        "investigations_charge": 10000,
+        "default_stay_days": 5,
+    }
+    dept = {"name": "Orthopaedics"}
+    settings = {
+        "hospital_name": "Sample Multispeciality Hospital",
+        "hospital_address": "Plot 12, Health City Road",
+        "hospital_phone": "+91 22 0000 0000",
+        "hospital_email": "billing@samplehospital.example",
+        "tax_rate": "0",
+        "contingency_rate": "10",
+        "estimate_range_pct": "10",
+        "validity_days": "15",
+        "disclaimer_text": "This is an estimate based on the standard treatment protocol.",
+    }
+
+    res = calculate_estimate(
+        patient_name="Ramesh Patil",
+        stay_days=5,
+        room_type=room,
+        doctor=doc,
+        procedure=proc,
+        department=dept,
+        discount_pct=0,
+        settings=settings,
+    )
+    res.estimate_number = "EST-20261011-0001"
+    pdf_bytes = pdf_generator.generate_estimate_pdf(res, is_draft=False)
+
+    # 1. Structure checks
+    assert pdf_bytes.startswith(b"%PDF-1.4")
+    assert b"NotoSans" in pdf_bytes
+    assert b"EST-20261011-0001" in pdf_bytes
+
+    # 2. Extract CMaps and content streams
+    pos = 0
+    cmaps = []
+    content_streams = []
+    while True:
+        s_idx = pdf_bytes.find(b"stream\n", pos)
+        if s_idx == -1:
+            break
+        start = s_idx + 7
+        e_idx = pdf_bytes.find(b"endstream", start)
+        if e_idx == -1:
+            break
+        raw = pdf_bytes[start:e_idx].rstrip(b"\r\n")
+        try:
+            d = zlib.decompress(raw)
+            if b"beginbfchar" in d:
+                m = {}
+                for line in d.splitlines():
+                    line = line.strip()
+                    if line.startswith(b"<") and b"> <" in line:
+                        parts = line.split()
+                        src = int(parts[0].strip(b"<>"), 16)
+                        dst = chr(int(parts[1].strip(b"<>"), 16))
+                        m[src] = dst
+                cmaps.append(m)
+        except Exception:
+            try:
+                norm_raw = raw if raw.endswith(b"~>") else (raw[:raw.find(b"~>")+2] if b"~>" in raw else raw + b"~>")
+                d = zlib.decompress(base64.a85decode(norm_raw, adobe=True))
+                if b"BT" in d and b"ET" in d:
+                    content_streams.append(d)
+            except Exception:
+                pass
+        pos = e_idx + 9
+
+    # 3. Assert Indian Rupee symbol (U+20B9) is in CMap
+    all_mapped_chars = set()
+    for cm in cmaps:
+        all_mapped_chars.update(cm.values())
+    assert "\u20b9" in all_mapped_chars
+
+    # 4. Decode content stream text using merged CMap
+    merged_cmap = {}
+    for cm in cmaps:
+        merged_cmap.update(cm)
+
+    def _unescape_pdf_literal(raw_bytes):
+        out = []
+        i = 0
+        n = len(raw_bytes)
+        while i < n:
+            if raw_bytes[i:i+1] == b"\\":
+                i += 1
+                if i >= n:
+                    break
+                oct_match = re.match(rb"^[0-7]{1,3}", raw_bytes[i:i+3])
+                if oct_match:
+                    oct_str = oct_match.group(0)
+                    out.append(int(oct_str, 8))
+                    i += len(oct_str)
+                else:
+                    esc = raw_bytes[i:i+1]
+                    if esc == b"n":
+                        out.append(10)
+                    elif esc == b"r":
+                        out.append(13)
+                    elif esc == b"t":
+                        out.append(9)
+                    elif esc == b"b":
+                        out.append(8)
+                    elif esc == b"f":
+                        out.append(12)
+                    elif esc in (b"(", b")", b"\\"):
+                        out.append(ord(esc))
+                    else:
+                        out.append(ord(esc))
+                    i += 1
+            else:
+                out.append(raw_bytes[i])
+                i += 1
+        return "".join(merged_cmap.get(c, chr(c) if 32 <= c <= 126 else "") for c in out)
+
+    decoded_fragments = []
+    for cs in content_streams:
+        tokens = re.findall(rb"<([0-9a-fA-F]+)>", cs)
+        for tok in tokens:
+            chars = []
+            for i in range(0, len(tok), 2):
+                code = int(tok[i:i+2], 16)
+                chars.append(merged_cmap.get(code, chr(code) if 32 <= code <= 126 else ""))
+            decoded_fragments.append("".join(chars))
+
+        lits = re.findall(rb"\((.*?)\)", cs)
+        for lit in lits:
+            decoded_fragments.append(_unescape_pdf_literal(lit))
+
+    full_pdf_text = " ".join(decoded_fragments)
+    # 5. Verify essential estimate text rendered in PDF
+    assert "Ramesh Patil" in full_pdf_text
+    assert "Total Knee Replacement" in full_pdf_text
+    assert "Dr. Sanjay Deshmukh" in full_pdf_text
+    assert "Orthopaedics" in full_pdf_text
+    assert "Sample Multispeciality Hospital" in full_pdf_text
+    assert "\u20b9" in full_pdf_text

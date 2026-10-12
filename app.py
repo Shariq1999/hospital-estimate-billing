@@ -6,10 +6,13 @@ per-rerun connection management, immutable estimates, and PDF exports.
 
 from __future__ import annotations
 
+import io
 import json
+import os
+import sqlite3
 from datetime import datetime
 from decimal import Decimal
-from typing import Any, Dict, List, Optional
+from typing import Optional
 
 import pandas as pd
 import streamlit as st
@@ -39,11 +42,13 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+DB_PATH = os.environ.get("HOSPITAL_DB_PATH", "hospital.db")
+
 
 @st.cache_resource
-def ensure_db_initialized():
+def ensure_db_initialized(path: str = DB_PATH):
     """Initialize database schema and seed data once (cached)."""
-    init_conn = database.get_connection("hospital.db")
+    init_conn = database.get_connection(path)
     try:
         database.init_db(init_conn)
         seed_data.seed(init_conn)
@@ -51,11 +56,11 @@ def ensure_db_initialized():
         init_conn.close()
 
 
-ensure_db_initialized()
+ensure_db_initialized(DB_PATH)
 
 
 # Open a fresh SQLite connection per rerun
-conn = database.get_connection("hospital.db")
+conn = database.get_connection(DB_PATH)
 
 try:
     # Initialize Session State
@@ -584,7 +589,12 @@ try:
                 if st.button("🚪 Log Out", width="stretch"):
                     st.session_state["admin_authenticated"] = False
                     st.session_state["admin_username"] = None
+                    st.session_state.pop("db_backup_bytes", None)
+                    st.session_state.pop("db_backup_prepared_at", None)
                     st.rerun()
+
+            if "admin_flash_message" in st.session_state:
+                st.success(st.session_state.pop("admin_flash_message"))
 
             st.divider()
 
@@ -629,13 +639,13 @@ try:
                             if not new_r_name.strip():
                                 st.error("Room category name cannot be blank.")
                             else:
-                                valid, rate_dec, err = billing.validate_money_field(new_r_rate, "Daily Rate", allow_zero=True)
+                                valid, rate_dec, err = billing.validate_whole_rupee_field(new_r_rate, "Daily Rate", allow_zero=True)
                                 if not valid:
                                     st.error(err)
                                 else:
                                     try:
                                         database.save_room_type(conn, new_r_name.strip(), int(rate_dec), new_r_desc.strip())
-                                        st.success(f"Room category '{new_r_name.strip()}' added successfully.")
+                                        st.session_state["admin_flash_message"] = f"Room category '{new_r_name.strip()}' added successfully."
                                         st.rerun()
                                     except sqlite3.IntegrityError as e:
                                         st.error(f"Cannot add room category: {e}")
@@ -652,21 +662,21 @@ try:
                         )
                         target_r = r_edit_map[sel_r_id]
                         with st.form("edit_room_form"):
-                            edit_r_name = st.text_input("Room Category Name", value=target_r["name"])
-                            edit_r_rate = st.text_input("Daily Rate (₹)", value=str(target_r["daily_rate"]))
-                            edit_r_desc = st.text_input("Description", value=target_r["description"] or "")
+                            edit_r_name = st.text_input("Room Category Name", value=target_r["name"], key=f"edit_r_name_{sel_r_id}")
+                            edit_r_rate = st.text_input("Daily Rate (₹)", value=str(target_r["daily_rate"]), key=f"edit_r_rate_{sel_r_id}")
+                            edit_r_desc = st.text_input("Description", value=target_r["description"] or "", key=f"edit_r_desc_{sel_r_id}")
                             edit_r_sub = st.form_submit_button("💾 Save Changes", width="stretch")
                             if edit_r_sub:
                                 if not edit_r_name.strip():
                                     st.error("Room category name cannot be blank.")
                                 else:
-                                    valid, rate_dec, err = billing.validate_money_field(edit_r_rate, "Daily Rate", allow_zero=True)
+                                    valid, rate_dec, err = billing.validate_whole_rupee_field(edit_r_rate, "Daily Rate", allow_zero=True)
                                     if not valid:
                                         st.error(err)
                                     else:
                                         try:
                                             database.save_room_type(conn, edit_r_name.strip(), int(rate_dec), edit_r_desc.strip(), room_id=sel_r_id)
-                                            st.success("Room category updated.")
+                                            st.session_state["admin_flash_message"] = f"Room category '{edit_r_name.strip()}' updated successfully."
                                             st.rerun()
                                         except sqlite3.IntegrityError as e:
                                             st.error(f"Cannot update room category: {e}")
@@ -705,7 +715,7 @@ try:
                             else:
                                 try:
                                     database.save_department(conn, new_d_name.strip())
-                                    st.success(f"Department '{new_d_name.strip()}' created.")
+                                    st.session_state["admin_flash_message"] = f"Department '{new_d_name.strip()}' created."
                                     st.rerun()
                                 except sqlite3.IntegrityError as e:
                                     st.error(f"Cannot create department: {e}")
@@ -722,7 +732,7 @@ try:
                         )
                         target_d = d_edit_map[sel_d_id]
                         with st.form("edit_dept_form"):
-                            edit_d_name = st.text_input("Department Name", value=target_d["name"])
+                            edit_d_name = st.text_input("Department Name", value=target_d["name"], key=f"edit_d_name_{sel_d_id}")
                             edit_d_sub = st.form_submit_button("💾 Rename Department", width="stretch")
                             if edit_d_sub:
                                 if not edit_d_name.strip():
@@ -730,7 +740,7 @@ try:
                                 else:
                                     try:
                                         database.save_department(conn, edit_d_name.strip(), dept_id=sel_d_id)
-                                        st.success("Department renamed.")
+                                        st.session_state["admin_flash_message"] = "Department renamed."
                                         st.rerun()
                                     except sqlite3.IntegrityError as e:
                                         st.error(f"Cannot rename department: {e}")
@@ -790,20 +800,22 @@ try:
                                 if not new_doc_name.strip():
                                     st.error("Doctor name cannot be blank.")
                                 else:
-                                    valid, fee_dec, err = billing.validate_money_field(new_doc_fee, "Consultation Fee", allow_zero=True)
-                                    if not valid:
-                                        st.error(err)
+                                    v_fee, fee_dec, e_fee = billing.validate_whole_rupee_field(new_doc_fee, "Consultation Fee", allow_zero=True)
+                                    v_pct, pct_val, e_pct = billing.validate_whole_percentage_field(new_doc_pct, "Surgeon Fee (%)")
+                                    if not (v_fee and v_pct):
+                                        errs = [e for e in (e_fee, e_pct) if e]
+                                        st.error("; ".join(errs))
                                     else:
                                         try:
                                             database.save_doctor(
                                                 conn,
                                                 name=new_doc_name.strip(),
                                                 department_id=new_doc_dept_id,
-                                                consultation_fee=int(fee_dec),
-                                                surgeon_fee_pct=int(new_doc_pct),
+                                                consultation_fee=fee_dec,
+                                                surgeon_fee_pct=pct_val,
                                                 specialization=new_doc_spec.strip(),
                                             )
-                                            st.success(f"Doctor '{new_doc_name.strip()}' added.")
+                                            st.session_state["admin_flash_message"] = f"Doctor '{new_doc_name.strip()}' added successfully."
                                             st.rerun()
                                         except sqlite3.IntegrityError as e:
                                             st.error(f"Cannot add doctor: {e}")
@@ -820,44 +832,46 @@ try:
                         )
                         target_doc = doc_map[sel_doc_id]
                         with st.form("edit_doctor_form"):
-                            edit_doc_name = st.text_input("Doctor Name", value=target_doc["name"])
+                            edit_doc_name = st.text_input("Doctor Name", value=target_doc["name"], key=f"edit_doc_name_{sel_doc_id}")
                             edit_doc_dept_id = st.selectbox(
                                 "Department",
                                 options=list(all_depts_map.keys()),
                                 index=list(all_depts_map.keys()).index(target_doc["department_id"]) if target_doc["department_id"] in all_depts_map else 0,
                                 format_func=lambda x: all_depts_map.get(x, ""),
-                                key="edit_doc_dept",
+                                key=f"edit_doc_dept_{sel_doc_id}",
                             )
-                            edit_doc_fee = st.text_input("Consultation Fee (₹)", value=str(target_doc["consultation_fee"]))
+                            edit_doc_fee = st.text_input("Consultation Fee (₹)", value=str(target_doc["consultation_fee"]), key=f"edit_doc_fee_{sel_doc_id}")
                             edit_doc_pct = st.number_input(
                                 "Surgeon Fee (%)",
                                 min_value=0,
                                 max_value=100,
                                 value=int(target_doc["surgeon_fee_pct"]),
-                                step=5,
-                                key="edit_doc_pct",
+                                step=1,
+                                key=f"edit_doc_pct_{sel_doc_id}",
                             )
-                            edit_doc_spec = st.text_input("Specialization", value=target_doc["specialization"] or "")
+                            edit_doc_spec = st.text_input("Specialization", value=target_doc["specialization"] or "", key=f"edit_doc_spec_{sel_doc_id}")
                             edit_doc_sub = st.form_submit_button("💾 Save Doctor Changes", width="stretch")
                             if edit_doc_sub:
                                 if not edit_doc_name.strip():
                                     st.error("Doctor name cannot be blank.")
                                 else:
-                                    valid, fee_dec, err = billing.validate_money_field(edit_doc_fee, "Consultation Fee", allow_zero=True)
-                                    if not valid:
-                                        st.error(err)
+                                    v_fee, fee_dec, e_fee = billing.validate_whole_rupee_field(edit_doc_fee, "Consultation Fee", allow_zero=True)
+                                    v_pct, pct_val, e_pct = billing.validate_whole_percentage_field(edit_doc_pct, "Surgeon Fee (%)")
+                                    if not (v_fee and v_pct):
+                                        errs = [e for e in (e_fee, e_pct) if e]
+                                        st.error("; ".join(errs))
                                     else:
                                         try:
                                             database.save_doctor(
                                                 conn,
                                                 name=edit_doc_name.strip(),
                                                 department_id=edit_doc_dept_id,
-                                                consultation_fee=int(fee_dec),
-                                                surgeon_fee_pct=int(edit_doc_pct),
+                                                consultation_fee=fee_dec,
+                                                surgeon_fee_pct=pct_val,
                                                 specialization=edit_doc_spec.strip(),
                                                 doc_id=sel_doc_id,
                                             )
-                                            st.success("Doctor record updated.")
+                                            st.session_state["admin_flash_message"] = f"Doctor '{edit_doc_name.strip()}' updated successfully."
                                             st.rerun()
                                         except sqlite3.IntegrityError as e:
                                             st.error(f"Cannot update doctor: {e}")
@@ -921,11 +935,11 @@ try:
                                 if not new_pr_name.strip():
                                     st.error("Procedure name cannot be blank.")
                                 else:
-                                    v_base, dec_base, e_base = billing.validate_money_field(new_pr_base, "Base Cost", allow_zero=True)
-                                    v_ot, dec_ot, e_ot = billing.validate_money_field(new_pr_ot, "OT Charge", allow_zero=True)
-                                    v_an, dec_an, e_an = billing.validate_money_field(new_pr_anaes, "Anaesthesia Charge", allow_zero=True)
-                                    v_co, dec_co, e_co = billing.validate_money_field(new_pr_cons, "Consumables Cost", allow_zero=True)
-                                    v_in, dec_in, e_in = billing.validate_money_field(new_pr_inv, "Investigations Charge", allow_zero=True)
+                                    v_base, dec_base, e_base = billing.validate_whole_rupee_field(new_pr_base, "Base Cost", allow_zero=True)
+                                    v_ot, dec_ot, e_ot = billing.validate_whole_rupee_field(new_pr_ot, "OT Charge", allow_zero=True)
+                                    v_an, dec_an, e_an = billing.validate_whole_rupee_field(new_pr_anaes, "Anaesthesia Charge", allow_zero=True)
+                                    v_co, dec_co, e_co = billing.validate_whole_rupee_field(new_pr_cons, "Consumables Cost", allow_zero=True)
+                                    v_in, dec_in, e_in = billing.validate_whole_rupee_field(new_pr_inv, "Investigations Charge", allow_zero=True)
                                     if not (v_base and v_ot and v_an and v_co and v_in):
                                         errs = [e for e in (e_base, e_ot, e_an, e_co, e_in) if e]
                                         st.error("; ".join(errs))
@@ -935,14 +949,14 @@ try:
                                                 conn,
                                                 name=new_pr_name.strip(),
                                                 department_id=new_pr_dept_id,
-                                                base_cost=int(dec_base),
-                                                ot_charge=int(dec_ot),
-                                                anaesthesia_charge=int(dec_an),
-                                                consumables_cost=int(dec_co),
-                                                investigations_charge=int(dec_in),
+                                                base_cost=dec_base,
+                                                ot_charge=dec_ot,
+                                                anaesthesia_charge=dec_an,
+                                                consumables_cost=dec_co,
+                                                investigations_charge=dec_in,
                                                 default_stay_days=int(new_pr_stay),
                                             )
-                                            st.success(f"Procedure '{new_pr_name.strip()}' created.")
+                                            st.session_state["admin_flash_message"] = f"Procedure '{new_pr_name.strip()}' created successfully."
                                             st.rerun()
                                         except sqlite3.IntegrityError as e:
                                             st.error(f"Cannot create procedure: {e}")
@@ -959,36 +973,36 @@ try:
                         )
                         target_pr = proc_map[sel_pr_id]
                         with st.form("edit_proc_form"):
-                            edit_pr_name = st.text_input("Procedure Name", value=target_pr["name"])
+                            edit_pr_name = st.text_input("Procedure Name", value=target_pr["name"], key=f"edit_pr_name_{sel_pr_id}")
                             edit_pr_dept_id = st.selectbox(
                                 "Department",
                                 options=list(all_depts_map.keys()),
                                 index=list(all_depts_map.keys()).index(target_pr["department_id"]) if target_pr["department_id"] in all_depts_map else 0,
                                 format_func=lambda x: all_depts_map.get(x, ""),
-                                key="edit_pr_dept",
+                                key=f"edit_pr_dept_{sel_pr_id}",
                             )
-                            edit_pr_base = st.text_input("Base Tariff (₹)", value=str(target_pr["base_cost"]))
-                            edit_pr_ot = st.text_input("OT Charge (₹)", value=str(target_pr["ot_charge"]))
-                            edit_pr_anaes = st.text_input("Anaesthesia Charge (₹)", value=str(target_pr["anaesthesia_charge"]))
-                            edit_pr_cons = st.text_input("Consumables Cost (₹)", value=str(target_pr["consumables_cost"]))
-                            edit_pr_inv = st.text_input("Investigations Charge (₹)", value=str(target_pr["investigations_charge"]))
+                            edit_pr_base = st.text_input("Base Tariff (₹)", value=str(target_pr["base_cost"]), key=f"edit_pr_base_{sel_pr_id}")
+                            edit_pr_ot = st.text_input("OT Charge (₹)", value=str(target_pr["ot_charge"]), key=f"edit_pr_ot_{sel_pr_id}")
+                            edit_pr_anaes = st.text_input("Anaesthesia Charge (₹)", value=str(target_pr["anaesthesia_charge"]), key=f"edit_pr_anaes_{sel_pr_id}")
+                            edit_pr_cons = st.text_input("Consumables Cost (₹)", value=str(target_pr["consumables_cost"]), key=f"edit_pr_cons_{sel_pr_id}")
+                            edit_pr_inv = st.text_input("Investigations Charge (₹)", value=str(target_pr["investigations_charge"]), key=f"edit_pr_inv_{sel_pr_id}")
                             edit_pr_stay = st.number_input(
                                 "Default Stay (Days)",
                                 min_value=0,
                                 max_value=365,
                                 value=int(target_pr["default_stay_days"]),
-                                key="edit_pr_stay",
+                                key=f"edit_pr_stay_{sel_pr_id}",
                             )
                             edit_pr_sub = st.form_submit_button("💾 Save Procedure Changes", width="stretch")
                             if edit_pr_sub:
                                 if not edit_pr_name.strip():
                                     st.error("Procedure name cannot be blank.")
                                 else:
-                                    v_base, dec_base, e_base = billing.validate_money_field(edit_pr_base, "Base Cost", allow_zero=True)
-                                    v_ot, dec_ot, e_ot = billing.validate_money_field(edit_pr_ot, "OT Charge", allow_zero=True)
-                                    v_an, dec_an, e_an = billing.validate_money_field(edit_pr_anaes, "Anaesthesia Charge", allow_zero=True)
-                                    v_co, dec_co, e_co = billing.validate_money_field(edit_pr_cons, "Consumables Cost", allow_zero=True)
-                                    v_in, dec_in, e_in = billing.validate_money_field(edit_pr_inv, "Investigations Charge", allow_zero=True)
+                                    v_base, dec_base, e_base = billing.validate_whole_rupee_field(edit_pr_base, "Base Cost", allow_zero=True)
+                                    v_ot, dec_ot, e_ot = billing.validate_whole_rupee_field(edit_pr_ot, "OT Charge", allow_zero=True)
+                                    v_an, dec_an, e_an = billing.validate_whole_rupee_field(edit_pr_anaes, "Anaesthesia Charge", allow_zero=True)
+                                    v_co, dec_co, e_co = billing.validate_whole_rupee_field(edit_pr_cons, "Consumables Cost", allow_zero=True)
+                                    v_in, dec_in, e_in = billing.validate_whole_rupee_field(edit_pr_inv, "Investigations Charge", allow_zero=True)
                                     if not (v_base and v_ot and v_an and v_co and v_in):
                                         errs = [e for e in (e_base, e_ot, e_an, e_co, e_in) if e]
                                         st.error("; ".join(errs))
@@ -998,15 +1012,15 @@ try:
                                                 conn,
                                                 name=edit_pr_name.strip(),
                                                 department_id=edit_pr_dept_id,
-                                                base_cost=int(dec_base),
-                                                ot_charge=int(dec_ot),
-                                                anaesthesia_charge=int(dec_an),
-                                                consumables_cost=int(dec_co),
-                                                investigations_charge=int(dec_in),
+                                                base_cost=dec_base,
+                                                ot_charge=dec_ot,
+                                                anaesthesia_charge=dec_an,
+                                                consumables_cost=dec_co,
+                                                investigations_charge=dec_in,
                                                 default_stay_days=int(edit_pr_stay),
                                                 proc_id=sel_pr_id,
                                             )
-                                            st.success("Procedure updated.")
+                                            st.session_state["admin_flash_message"] = f"Procedure '{edit_pr_name.strip()}' updated successfully."
                                             st.rerun()
                                         except sqlite3.IntegrityError as e:
                                             st.error(f"Cannot update procedure: {e}")
@@ -1027,9 +1041,12 @@ try:
             # ------------------------------------------------------------------
             with admin_tabs[4]:
                 st.subheader("Hospital & Tariff Configuration Settings")
+                if "settings_saved_msg" in st.session_state:
+                    st.success(st.session_state.pop("settings_saved_msg"))
+
                 curr_settings = database.get_settings(conn)
                 with st.form("settings_form"):
-                    h_name = st.text_input("Hospital Name", value=curr_settings.get("hospital_name", ""))
+                    h_name = st.text_input("Hospital Name *", value=curr_settings.get("hospital_name", ""))
                     h_addr = st.text_area("Hospital Address", value=curr_settings.get("hospital_address", ""))
                     col_s1, col_s2 = st.columns(2)
                     with col_s1:
@@ -1049,41 +1066,93 @@ try:
 
                     disc_txt = st.text_area("Disclaimer Text", value=curr_settings.get("disclaimer_text", ""))
 
+                    st.write("##### 🧾 Category-wise Tax Applicability (GST)")
+                    st.caption("Healthcare services by clinical establishments are generally exempt under GST (tax rate 0%). Note: Room rent exceeding ₹5,000 per day outside ICU may attract 5% GST without ITC. Consult finance before enabling tax on any category.")
+
+                    tax_c1, tax_c2 = st.columns(2)
+                    with tax_c1:
+                        t_room = st.checkbox(
+                            "Room Accommodation (Non-ICU rent > ₹5,000/day)",
+                            value=curr_settings.get("tax_category_room", "0") in ("1", "true", "yes"),
+                            key="set_tax_cat_room",
+                        )
+                        t_proc = st.checkbox(
+                            "Hospital Procedure Tariff",
+                            value=curr_settings.get("tax_category_procedure", "0") in ("1", "true", "yes"),
+                            key="set_tax_cat_procedure",
+                        )
+                        t_doc = st.checkbox(
+                            "Surgeon Professional Fee",
+                            value=curr_settings.get("tax_category_surgeon", "0") in ("1", "true", "yes"),
+                            key="set_tax_cat_surgeon",
+                        )
+                        t_ot = st.checkbox(
+                            "Operation Theatre Charges",
+                            value=curr_settings.get("tax_category_ot", "0") in ("1", "true", "yes"),
+                            key="set_tax_cat_ot",
+                        )
+                    with tax_c2:
+                        t_anaes = st.checkbox(
+                            "Anaesthesia Charges",
+                            value=curr_settings.get("tax_category_anaesthesia", "0") in ("1", "true", "yes"),
+                            key="set_tax_cat_anaesthesia",
+                        )
+                        t_cons = st.checkbox(
+                            "Surgical Consumables & Implants",
+                            value=curr_settings.get("tax_category_consumables", "0") in ("1", "true", "yes"),
+                            key="set_tax_cat_consumables",
+                        )
+                        t_inv = st.checkbox(
+                            "Investigations & Diagnostics",
+                            value=curr_settings.get("tax_category_investigations", "0") in ("1", "true", "yes"),
+                            key="set_tax_cat_investigations",
+                        )
+
                     save_settings_sub = st.form_submit_button("💾 Save System Settings", type="primary", width="stretch")
                     if save_settings_sub:
-                        v_tax, d_tax, e_tax = billing.validate_percentage_field(tax_r, "Tax Rate")
-                        v_cont, d_cont, e_cont = billing.validate_percentage_field(cont_r, "Contingency Rate")
-                        v_rng, d_rng, e_rng = billing.validate_percentage_field(rng_p, "Range Band")
-                        try:
-                            val_days_int = int(val_d)
-                            if val_days_int <= 0:
-                                v_val = False
-                                e_val = "Validity days must be a positive number."
-                            else:
-                                v_val = True
-                                e_val = ""
-                        except Exception:
-                            v_val = False
-                            e_val = "Validity days must be a valid integer."
-
-                        if not (v_tax and v_cont and v_rng and v_val):
-                            errs = [e for e in (e_tax, e_cont, e_rng, e_val) if e]
-                            st.error("; ".join(errs))
+                        if not h_name.strip():
+                            st.error("Hospital Name cannot be blank (required).")
                         else:
-                            updated_dict = {
-                                "hospital_name": h_name.strip(),
-                                "hospital_address": h_addr.strip(),
-                                "hospital_phone": h_phone.strip(),
-                                "hospital_email": h_email.strip(),
-                                "tax_rate": str(d_tax),
-                                "contingency_rate": str(d_cont),
-                                "estimate_range_pct": str(d_rng),
-                                "validity_days": str(val_days_int),
-                                "disclaimer_text": disc_txt.strip(),
-                            }
-                            database.update_settings(conn, updated_dict)
-                            st.success("System settings updated successfully.")
-                            st.rerun()
+                            v_tax, d_tax, e_tax = billing.validate_percentage_field(tax_r, "Tax Rate")
+                            v_cont, d_cont, e_cont = billing.validate_percentage_field(cont_r, "Contingency Rate")
+                            v_rng, d_rng, e_rng = billing.validate_percentage_field(rng_p, "Range Band")
+                            try:
+                                val_days_int = int(val_d)
+                                if val_days_int <= 0:
+                                    v_val = False
+                                    e_val = "Validity days must be a positive number."
+                                else:
+                                    v_val = True
+                                    e_val = ""
+                            except Exception:
+                                v_val = False
+                                e_val = "Validity days must be a valid integer."
+
+                            if not (v_tax and v_cont and v_rng and v_val):
+                                errs = [e for e in (e_tax, e_cont, e_rng, e_val) if e]
+                                st.error("; ".join(errs))
+                            else:
+                                updated_dict = {
+                                    "hospital_name": h_name.strip(),
+                                    "hospital_address": h_addr.strip(),
+                                    "hospital_phone": h_phone.strip(),
+                                    "hospital_email": h_email.strip(),
+                                    "tax_rate": str(d_tax),
+                                    "contingency_rate": str(d_cont),
+                                    "estimate_range_pct": str(d_rng),
+                                    "validity_days": str(val_days_int),
+                                    "disclaimer_text": disc_txt.strip(),
+                                    "tax_category_room": "1" if t_room else "0",
+                                    "tax_category_procedure": "1" if t_proc else "0",
+                                    "tax_category_surgeon": "1" if t_doc else "0",
+                                    "tax_category_ot": "1" if t_ot else "0",
+                                    "tax_category_anaesthesia": "1" if t_anaes else "0",
+                                    "tax_category_consumables": "1" if t_cons else "0",
+                                    "tax_category_investigations": "1" if t_inv else "0",
+                                }
+                                database.update_settings(conn, updated_dict)
+                                st.session_state["settings_saved_msg"] = "System settings updated successfully."
+                                st.rerun()
 
             # ------------------------------------------------------------------
             # TAB 6: CSV IMPORT / EXPORT
@@ -1150,7 +1219,7 @@ try:
                                         ins, upd = database.import_doctors_csv(conn, csv_raw_bytes)
                                     else:
                                         ins, upd = database.import_procedures_csv(conn, csv_raw_bytes)
-                                    st.success(f"✅ Import successful: {ins} added, {upd} updated.")
+                                    st.session_state["admin_flash_message"] = f"✅ Import successful: {ins} added, {upd} updated."
                                     st.rerun()
                                 except Exception as e:
                                     st.error(f"❌ Import failed (all changes rolled back): {e}")
@@ -1191,14 +1260,23 @@ try:
                     "Generate a hot, transactional snapshot of the entire SQLite database (`hospital.db`). "
                     "The backup is created using SQLite's native backup API and checkpointed safely even with active readers/writers in WAL mode."
                 )
-                backup_data = database.backup_database(conn)
-                st.download_button(
-                    label="💾 Download Database Backup (hospital_backup.db)",
-                    data=backup_data,
-                    file_name="hospital_backup.db",
-                    mime="application/octet-stream",
-                    width="stretch",
-                )
+
+                if st.button("📦 Prepare Backup Snapshot", key="btn_prepare_backup", width="stretch"):
+                    st.session_state["db_backup_bytes"] = database.backup_database(conn)
+                    st.session_state["db_backup_prepared_at"] = datetime.now().strftime("%d-%b-%Y %H:%M:%S")
+                    st.rerun()
+
+                if "db_backup_bytes" in st.session_state:
+                    prep_time = st.session_state.get("db_backup_prepared_at", "just now")
+                    st.success(f"✅ Backup snapshot ready (prepared at {prep_time}). Click below to download.")
+                    st.download_button(
+                        label="💾 Download Database Backup (hospital_backup.db)",
+                        data=st.session_state["db_backup_bytes"],
+                        file_name="hospital_backup.db",
+                        mime="application/octet-stream",
+                        width="stretch",
+                        key="btn_download_backup",
+                    )
 
 finally:
     # Ensure SQLite connection is closed at the end of every rerun

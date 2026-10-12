@@ -54,7 +54,7 @@ A prototype suitable for internal use on a hospital network for generating patie
 ## ⚠️ Before Real Use
 
 1. **Replace Sample Tariffs:** All seeded names, tariffs, doctor fees, and room rates are illustrative placeholders for a metro private hospital. Replace them with your hospital's board-approved tariff schedule before generating real estimates.
-2. **Confirm GST / Tax Treatment:** Consult your hospital's finance and tax department before adjusting tax rates. The default tax rate is set to **0%** as healthcare services are generally exempt under Indian GST law, while certain implants or outsourced items may have specific rules.
+2. **Confirm GST / Tax Treatment:** Consult your hospital's finance and tax department before adjusting tax rates or enabling category tax flags. The default tax rate is set to **0%** and all tariff categories default to non-taxable (exempt). Under Indian GST regulations, healthcare services provided by clinical establishments are generally exempt from GST; however, **room rent exceeding ₹5,000 per day outside an ICU may attract 5% GST without Input Tax Credit (ITC)**. Finance must confirm this treatment before enabling the taxable flag on Room Accommodation or any other category.
 3. **Protect Personal Healthcare Data:** Patient names and clinical procedures are sensitive personal data. Run this application exclusively on a private, secured workstation or intranet within the hospital network. **Never host this on public or unauthenticated cloud environments.**
 4. **Secure Database Backups:** Database backups (`hospital_backup.db`) contain patient estimate records and the administrator's PBKDF2 password hash. Store downloaded backups in an encrypted, access-controlled directory.
 
@@ -94,6 +94,7 @@ Estimation/
 ├── tests/
 │   ├── __init__.py
 │   ├── test_admin.py                # Admin auth, reset script, soft-deletes, CSV
+│   ├── test_app_test.py             # UI automation tests with streamlit.testing.v1.AppTest
 │   ├── test_billing.py              # Decimal calculations, discount allocation, INR
 │   ├── test_database.py             # Schema, WAL mode, transactional counter
 │   ├── test_generator_flow.py       # End-to-end estimate generation flow
@@ -159,10 +160,13 @@ pytest -v
 ```
 
 ### Test Suite Results
-In our latest run on **Python 3.14.7** (`pytest-9.1.1` on `win32`), all **33 tests passed** in **3.28s**:
+In our latest run on **Python 3.14.7** (`pytest-9.1.1` on `win32`), all **44 tests passed** in **19.02s**:
 - **Authentication & Security:** First-run onboarding, login attempt deterrent delay, password change, and CLI `reset_admin.py` emergency reset.
+- **Streamlit AppTest UI Suite (`test_app_test.py`):** First-run onboarding flow, duplicate department error handling (friendly error without exceptions), doctor and procedure add/edit, switching selected doctors reloading corresponding form values, saving without changes leaving master records unchanged, prevention of stale form input leakage across record selections, and CSV upload preview & atomic import.
+- **Whole Rupee & Percentage Validation:** Strict rejection of non-whole rupee amounts (paise/decimals) and fractional surgeon fee percentages in admin forms and CSV import with clear messages (`columns are whole rupees`).
+- **Category-wise Tax Configuration:** Default non-taxable healthcare exemption, per-category tax toggles in Settings, and tax calculations.
 - **Idempotent Seeding & Soft Deletes:** Verification that clearing master tables never triggers re-seeding on restart, plus soft-delete/restore across room types, departments, doctors, and procedures.
 - **Duplicate Prevention:** IntegrityError raised on duplicate names.
 - **CSV Portability & Injection Defense:** Formula neutralization (`'`, `=`, `+`, `-`, `@`), UTF-8 BOM encoding, department resolution by name, and all-or-nothing rollback on invalid rows.
 - **Financial Precision:** Exact Decimal `ROUND_HALF_UP` rounding, leftover paise distribution to the largest line item, Day Care (LOS 0) zero room charges, and Indian digit grouping (`format_inr`).
-- **Audit Immutability:** Historical snapshots and reprints maintain frozen dates and prices against future tariff updates.
+- **Audit Immutability & Safe PDF:** Historical snapshots and reprints maintain frozen dates and prices against future tariff updates; XML characters escaped (`xml.sax.saxutils.escape`) to prevent ReportLab parsing crashes; embedded Noto Sans font stream decompressing and verifying U+20B9 (`₹`) glyph mapping.
