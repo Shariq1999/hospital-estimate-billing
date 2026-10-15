@@ -35,6 +35,14 @@ def get_connection(db_path: str = DB_FILE) -> sqlite3.Connection:
     return conn
 
 
+def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, col_def: str) -> None:
+    """Add a column to a table only if it doesn't already exist (safe migration helper)."""
+    existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in existing:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_def}")
+        conn.commit()
+
+
 def init_db(conn: sqlite3.Connection) -> None:
     """Create all required tables, indexes, and initialize system counters."""
     with conn:
@@ -137,6 +145,12 @@ def init_db(conn: sqlite3.Connection) -> None:
         conn.execute(
             "INSERT OR IGNORE INTO counters (name, current_val) VALUES ('estimate', 0);"
         )
+        # Additive column migrations (safe on existing databases)
+        _add_column_if_missing(conn, "estimates", "mobile_number", "TEXT DEFAULT ''")
+        _add_column_if_missing(conn, "estimates", "uhid", "TEXT DEFAULT ''")
+        _add_column_if_missing(conn, "estimates", "revision_of", "TEXT DEFAULT NULL")
+        _add_column_if_missing(conn, "estimates", "converted", "INTEGER NOT NULL DEFAULT 0")
+        _add_column_if_missing(conn, "estimates", "actual_amount", "TEXT DEFAULT NULL")
 
 
 def get_next_estimate_number(conn: sqlite3.Connection) -> str:
@@ -547,8 +561,9 @@ def save_estimate(conn: sqlite3.Connection, est: Dict[str, Any]) -> str:
                 estimate_number, patient_name, room_type_id, department_id,
                 doctor_id, procedure_id, stay_days, discount_pct, subtotal,
                 discount_amount, contingency_amount, tax_amount, total_amount,
-                min_estimate, max_estimate, line_items_json, remarks, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                min_estimate, max_estimate, line_items_json, remarks, created_at,
+                mobile_number, uhid, revision_of
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 estimate_number,
@@ -569,16 +584,63 @@ def save_estimate(conn: sqlite3.Connection, est: Dict[str, Any]) -> str:
                 line_items_json,
                 est.get("remarks", ""),
                 est.get("created_at", now),
+                est.get("mobile_number", ""),
+                est.get("uhid", ""),
+                est.get("revision_of"),
             ),
         )
     return estimate_number
+
+
+def update_estimate_outcome(
+    conn: sqlite3.Connection,
+    estimate_number: str,
+    converted: bool,
+    actual_amount: Optional[str],
+) -> None:
+    """Update the conversion toggle and actual bill amount for an existing estimate."""
+    with conn:
+        conn.execute(
+            """
+            UPDATE estimates
+            SET converted = ?, actual_amount = ?
+            WHERE estimate_number = ?
+            """,
+            (1 if converted else 0, actual_amount or None, estimate_number),
+        )
+
+
+def get_next_revision_number(conn: sqlite3.Connection, base_est_num: str) -> str:
+    """
+    Generate the next revision estimate number for a given base estimate.
+    If base_est_num is 'EST-20261015-0001' or 'EST-20261015-0001-R1',
+    strips the -R suffix to find the root, then queries existing revisions
+    and returns f"{root}-R{next_idx}".
+    """
+    import re
+    root = re.sub(r"-R\d+$", "", base_est_num.strip())
+    cursor = conn.cursor()
+    rows = cursor.execute(
+        "SELECT estimate_number FROM estimates WHERE estimate_number = ? OR estimate_number LIKE ? OR revision_of = ?",
+        (root, f"{root}-R%", root),
+    ).fetchall()
+
+    max_rev = 0
+    for r in rows:
+        num = r["estimate_number"] if isinstance(r, sqlite3.Row) else r[0]
+        match = re.search(r"-R(\d+)$", num)
+        if match:
+            max_rev = max(max_rev, int(match.group(1)))
+
+    next_rev = max_rev + 1
+    return f"{root}-R{next_rev}"
 
 
 def get_estimates(
     conn: sqlite3.Connection,
     search_query: Optional[str] = None,
     department_id: Optional[int] = None,
-    limit: int = 100,
+    limit: Optional[int] = 100,
 ) -> List[Dict[str, Any]]:
     sql = """
         SELECT e.*, d.name as department_name, doc.name as doctor_name,
@@ -592,14 +654,17 @@ def get_estimates(
     """
     params: List[Any] = []
     if search_query:
-        sql += " AND (e.patient_name LIKE ? OR e.estimate_number LIKE ?)"
+        sql += " AND (e.patient_name LIKE ? OR e.estimate_number LIKE ? OR e.uhid LIKE ? OR e.mobile_number LIKE ?)"
         pattern = f"%{search_query.strip()}%"
-        params.extend([pattern, pattern])
+        params.extend([pattern, pattern, pattern, pattern])
     if department_id:
         sql += " AND e.department_id = ?"
         params.append(department_id)
-    sql += " ORDER BY e.id DESC LIMIT ?"
-    params.append(limit)
+    if limit is not None:
+        sql += " ORDER BY e.id DESC LIMIT ?"
+        params.append(limit)
+    else:
+        sql += " ORDER BY e.id DESC"
 
     rows = conn.execute(sql, params).fetchall()
     return [dict(r) for r in rows]

@@ -36,10 +36,30 @@ A prototype suitable for internal use on a hospital network for generating patie
 - **Historical Validity:** Validity expiration dates are computed strictly from the frozen creation date (`created_at`), never from today's date.
 - **Formatted Timestamps:** Displayed as `DD-MMM-YYYY HH:MM`.
 
-### 5. Administrator Portal & Security (`admin_auth`)
+### 5. Estimates Performance Dashboard & Analytics (`app.py`)
+- **Key Performance Indicators:** Instant summary tiles for Total Estimates, Total Value, Patient Conversion Rate, Average Estimate, and Average Accuracy Variance.
+- **Visual Analytics:** Interactive department-wise estimate volume and monthly trend bar charts.
+- **Outcome & Actual Bill Tracking:** Toggle patient treatment acceptance (converted) and record actual final hospital bills to measure estimation accuracy (`|actual − estimated| ÷ actual × 100%`).
+- **Running Excel Spreadsheet Ledger (`openpyxl`):** One-click export of all historical estimates to `.xlsx` format with auto-adjusted column widths and comprehensive clinical and financial data.
+
+### 6. Flexible Estimate Revision & Price Overrides
+- **Post-Creation Editing:** In `📋 Estimate History`, click **✏️ Revise / Edit Estimate** to load any past record back into the generator with all parameters pre-populated.
+- **Maximum Tariff Flexibility:** Advanced Price Overrides expander allows modifying any individual line item (room rate, procedure base cost, surgeon fee %, OT, anaesthesia, consumables, diagnostics).
+- **Audit-Safe Revision Chain:** Original records remain archived and immutable; edits save as linked revision records (`-R1`, `-R2`) with `revision_of` pointers.
+
+### 7. Comparative Room Tier Upgrade Analysis
+- **Automatic Superior Tier Calculation:** For any generated estimate, automatically calculates a comparative breakdown for the next higher room tier.
+- **Side-by-Side Financial Comparison:** Category-by-category cost comparison and total difference to assist in patient financial counseling.
+
+### 8. Standardized PDF Naming & Patient Identifiers
+- **Patient Identifiers:** Captures free-text UHID and international mobile numbers (with Indian format default).
+- **Naming Template:** Generated PDFs automatically download with the template `{PatientName}_{UHID}_{EstimateNumber}.pdf`.
+
+### 9. Administrator Portal & Security (`admin_auth`)
+- **Staff Authentication Gate:** Estimate generation is gated behind staff login (reusing admin credentials).
 - **PBKDF2 Password Hashing:** 600,000 iterations using PBKDF2-HMAC-SHA256 with a 16-byte random salt and constant-time `hmac.compare_digest` verification.
 - **First-Run Setup & Protection:** First-time onboarding requires creating an administrator account (minimum 8 characters).
-- **Basic Login Delay:** On failed login attempts, an intentional 1-second pause (`time.sleep(1)`) acts as a basic deterrent to slow down automated password guessing (note: this is a deterrence delay, not a permanent account lockout).
+- **Basic Login Delay:** On failed login attempts, an intentional 1-second pause (`time.sleep(1)`) acts as a basic deterrent to slow down automated password guessing.
 - **Soft Deletes Only:** Zero hard deletes across master tables (`room_types`, `departments`, `doctors`, `procedures`). Records can be deactivated and restored safely (`is_active = 0 / 1`).
 - **Duplicate Prevention:** Case-insensitive duplicate checks and `sqlite3.IntegrityError` guards.
 - **CSV Import & Export (behind login):**
@@ -160,13 +180,17 @@ pytest -v
 ```
 
 ### Test Suite Results
-In our latest run on **Python 3.14.7** (`pytest-9.1.1` on `win32`), all **44 tests passed** in **19.02s**:
-- **Authentication & Security:** First-run onboarding, login attempt deterrent delay, password change, and CLI `reset_admin.py` emergency reset.
+In our latest run on **Python 3.14.7** (`pytest-9.1.1` on `win32`), all **54 tests passed** in **14.00s**:
+- **Authentication & Security:** First-run onboarding, login attempt deterrent delay, password change, staff login gate for estimate generation, and CLI `reset_admin.py` emergency reset.
+- **Patient Identity & Validation:** Free-text UHID and international/Indian mobile number validation and SQLite persistence.
+- **Standardized PDF Naming & Rendering:** Verification of `{PatientName}_{UHID}_{EstimateNumber}.pdf` naming template and patient metadata in ReportLab letterheads.
+- **Comparative Tier Analysis:** Dynamic upgrade calculations for next-higher room category and graceful handling at top tier.
+- **Flexible Revision Workflow:** Verification of `-R1`, `-R2` revision number generation, `revision_of` pointer linking, and catalog price overrides.
+- **Outcome & Accuracy Analytics:** Treatment conversion toggle, final bill tracking, and exact accuracy variance calculation (`|actual − estimated| ÷ actual × 100%`).
+- **Excel Spreadsheet Ledger Export:** Programmatic `.xlsx` generation via `openpyxl` with auto-fit columns and comprehensive data fields.
 - **Streamlit AppTest UI Suite (`test_app_test.py`):** First-run onboarding flow, duplicate department error handling (friendly error without exceptions), doctor and procedure add/edit, switching selected doctors reloading corresponding form values, saving without changes leaving master records unchanged, prevention of stale form input leakage across record selections, and CSV upload preview & atomic import.
 - **Whole Rupee & Percentage Validation:** Strict rejection of non-whole rupee amounts (paise/decimals) and fractional surgeon fee percentages in admin forms and CSV import with clear messages (`columns are whole rupees`).
 - **Category-wise Tax Configuration:** Default non-taxable healthcare exemption, per-category tax toggles in Settings, and tax calculations.
 - **Idempotent Seeding & Soft Deletes:** Verification that clearing master tables never triggers re-seeding on restart, plus soft-delete/restore across room types, departments, doctors, and procedures.
-- **Duplicate Prevention:** IntegrityError raised on duplicate names.
-- **CSV Portability & Injection Defense:** Formula neutralization (`'`, `=`, `+`, `-`, `@`), UTF-8 BOM encoding, department resolution by name, and all-or-nothing rollback on invalid rows.
 - **Financial Precision:** Exact Decimal `ROUND_HALF_UP` rounding, leftover paise distribution to the largest line item, Day Care (LOS 0) zero room charges, and Indian digit grouping (`format_inr`).
 - **Audit Immutability & Safe PDF:** Historical snapshots and reprints maintain frozen dates and prices against future tariff updates; XML characters escaped (`xml.sax.saxutils.escape`) to prevent ReportLab parsing crashes; embedded Noto Sans font stream decompressing and verifying U+20B9 (`₹`) glyph mapping.

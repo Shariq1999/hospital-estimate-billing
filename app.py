@@ -9,10 +9,11 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import sqlite3
 from datetime import datetime
 from decimal import Decimal
-from typing import Optional
+from typing import Dict, Optional
 
 import pandas as pd
 import streamlit as st
@@ -85,11 +86,34 @@ try:
     # Sidebar Navigation
     st.sidebar.title("🏥 Hospital Billing")
     st.sidebar.caption("Automated Tariff & Estimate Generator")
+
+    nav_options = [
+        "🏥 Generate Estimate",
+        "📋 Estimate History",
+        "📊 Dashboard",
+        "⚙️ Admin Portal",
+    ]
+    if "nav_option" in st.session_state and st.session_state["nav_option"] in nav_options:
+        default_idx = nav_options.index(st.session_state.pop("nav_option"))
+    else:
+        default_idx = 0
+
     navigation_option = st.sidebar.radio(
         "Navigation Menu",
-        ["🏥 Generate Estimate", "📋 Estimate History", "⚙️ Admin Portal"],
-        index=0,
+        nav_options,
+        index=default_idx,
     )
+
+    if st.session_state.get("admin_authenticated"):
+        st.sidebar.markdown(f"👤 **Staff User:** `{st.session_state.get('admin_username', 'admin')}`")
+        if st.sidebar.button("🚪 Log Out", key="sidebar_logout_btn", width="stretch"):
+            st.session_state["admin_authenticated"] = False
+            st.session_state["admin_username"] = None
+            st.session_state.pop("db_backup_bytes", None)
+            st.session_state.pop("db_backup_prepared_at", None)
+            st.session_state.pop("revision_source", None)
+            st.rerun()
+
     st.sidebar.divider()
     st.sidebar.info(
         "**Currency:** Indian Rupees (₹)\n\n"
@@ -104,289 +128,545 @@ try:
         st.header("🏥 Patient Cost Estimation Generator")
         st.caption("Generate an itemized treatment estimate with professional doctor fees, OT, consumables, and hospital tariffs.")
 
-        settings = database.get_settings(conn)
-        hospital_name = settings.get("hospital_name", "Sample Multispeciality Hospital")
+        # Authentication Gate for Estimate Generation
+        if not st.session_state.get("admin_authenticated"):
+            admin_configured = database.is_admin_configured(conn)
+            if not admin_configured:
+                st.info("👋 **Welcome to First-Run Setup!** Please configure the administrator account in the **⚙️ Admin Portal** menu to begin.")
+            else:
+                st.subheader("🔐 Staff Authentication")
+                st.caption("Please log in with your credentials to generate or revise patient cost estimates.")
+                with st.form("generator_login_form"):
+                    gate_user = st.text_input("Username", key="gate_user")
+                    gate_pwd = st.text_input("Password", type="password", key="gate_pwd")
+                    gate_submitted = st.form_submit_button("🔓 Log In & Continue", type="primary", width="stretch")
+                    if gate_submitted:
+                        if database.verify_admin_credentials(conn, gate_user.strip(), gate_pwd):
+                            st.session_state["admin_authenticated"] = True
+                            st.session_state["admin_username"] = gate_user.strip()
+                            st.success("Authenticated successfully.")
+                            st.rerun()
+                        else:
+                            import time
+                            time.sleep(1)
+                            st.error("Invalid username or password.")
+        else:
+            settings = database.get_settings(conn)
+            hospital_name = settings.get("hospital_name", "Sample Multispeciality Hospital")
 
-        # Master Data Lookups (Active records only)
-        all_rooms = database.get_room_types(conn, active_only=True)
-        all_departments = database.get_departments(conn, active_only=True)
-
-        if not all_rooms:
-            st.error("❌ No active room categories configured. Please configure room categories in the Admin Portal.")
-        if not all_departments:
-            st.error("❌ No active departments configured. Please configure departments in the Admin Portal.")
-
-        can_generate = bool(all_rooms and all_departments)
-
-        if can_generate:
-            # Top Row: Patient Name & Room Category
-            col_p1, col_p2 = st.columns([2, 2])
-            with col_p1:
-                patient_name = st.text_input(
-                    "Patient Full Name *",
-                    placeholder="e.g. Rahul Sharma",
-                    key="input_patient_name",
-                    on_change=mark_inputs_changed,
-                )
-            with col_p2:
-                room_options = {r["id"]: r for r in all_rooms}
-                selected_room_id = st.selectbox(
-                    "Room Category *",
-                    options=list(room_options.keys()),
-                    format_func=lambda rid: f"{room_options[rid]['name']} — {billing.format_inr(room_options[rid]['daily_rate'], whole_rupees=True)}/day",
-                    key="input_room_id",
-                    on_change=mark_inputs_changed,
-                )
-                selected_room = room_options.get(selected_room_id)
-
-            # Cascading Dropdowns: Department -> Doctor & Procedure (OUTSIDE st.form)
-            st.subheader("Clinical Consultation & Procedure")
-            col_c1, col_c2, col_c3 = st.columns([1.5, 1.5, 2])
-
-            with col_c1:
-                dept_options = {d["id"]: d for d in all_departments}
-                selected_dept_id = st.selectbox(
-                    "Department *",
-                    options=list(dept_options.keys()),
-                    format_func=lambda did: dept_options[did]["name"],
-                    key="input_dept_id",
-                    on_change=mark_inputs_changed,
-                )
-                selected_dept = dept_options.get(selected_dept_id)
-
-            # Filter Doctors & Procedures by Selected Department
-            dept_doctors = database.get_doctors(conn, department_id=selected_dept_id, active_only=True)
-            dept_procedures = database.get_procedures(conn, department_id=selected_dept_id, active_only=True)
-
-            with col_c2:
-                if not dept_doctors:
-                    st.warning("⚠️ No active doctors configured in this department.")
-                    selected_doctor = None
-                else:
-                    doc_options = {doc["id"]: doc for doc in dept_doctors}
-                    selected_doc_id = st.selectbox(
-                        "Attending Doctor / Specialist *",
-                        options=list(doc_options.keys()),
-                        format_func=lambda did: f"{doc_options[did]['name']} ({doc_options[did]['specialization']} — Fee: {billing.format_inr(doc_options[did]['consultation_fee'], whole_rupees=True)}, {doc_options[did]['surgeon_fee_pct']}% fee)",
-                        key="input_doc_id",
-                        on_change=mark_inputs_changed,
+            # Revision Banner
+            rev_source = st.session_state.get("revision_source")
+            if rev_source:
+                col_rev_info, col_rev_btn = st.columns([4, 1.2])
+                with col_rev_info:
+                    orig_num = rev_source["estimate_number"]
+                    next_rev = database.get_next_revision_number(conn, orig_num)
+                    st.warning(
+                        f"✏️ **Revision Mode Active:** Modifying Estimate **{orig_num}** → will be saved as revision **{next_rev}** (original remains preserved in history)."
                     )
-                    selected_doctor = doc_options.get(selected_doc_id)
-
-            with col_c3:
-                if not dept_procedures:
-                    st.warning("⚠️ No active procedures configured in this department.")
-                    selected_procedure = None
-                else:
-                    proc_options = {p["id"]: p for p in dept_procedures}
-                    selected_proc_id = st.selectbox(
-                        "Surgical / Medical Procedure *",
-                        options=list(proc_options.keys()),
-                        format_func=lambda pid: f"{proc_options[pid]['name']} (Base: {billing.format_inr(proc_options[pid]['base_cost'], whole_rupees=True)})",
-                        key="input_proc_id",
-                        on_change=mark_inputs_changed,
-                    )
-                    selected_procedure = proc_options.get(selected_proc_id)
-
-            # Update Length of Stay default if procedure changed
-            if selected_procedure:
-                proc_current_id = selected_procedure["id"]
-                if st.session_state["last_proc_id"] != proc_current_id:
-                    st.session_state["input_stay_days"] = selected_procedure["default_stay_days"]
-                    st.session_state["last_proc_id"] = proc_current_id
-                    st.session_state["inputs_dirty"] = True
-
-            # Adjustments & Overrides Row (NO value= parameter on input_stay_days)
-            col_o1, col_o2, col_o3 = st.columns([1.2, 1.2, 2.5])
-            with col_o1:
-                stay_days = st.number_input(
-                    "Length of Stay (Days) *",
-                    min_value=0,
-                    max_value=365,
-                    help="Default stay for this procedure. Enter 0 for Day Care / OPD surgery.",
-                    key="input_stay_days",
-                    on_change=mark_inputs_changed,
-                )
-            with col_o2:
-                discount_pct = st.number_input(
-                    "Special Discount (%)",
-                    min_value=0.0,
-                    max_value=100.0,
-                    value=0.0,
-                    step=1.0,
-                    help="Proportionally allocated across all line items.",
-                    key="input_discount_pct",
-                    on_change=mark_inputs_changed,
-                )
-            with col_o3:
-                remarks = st.text_input(
-                    "Remarks / Specific Clinical Notes",
-                    placeholder="e.g. High-risk cardiac history, robotic assistance",
-                    key="input_remarks",
-                    on_change=mark_inputs_changed,
-                )
-
-            st.markdown("<br/>", unsafe_allow_html=True)
-            col_act1, col_act2 = st.columns([1.5, 4])
-            with col_act1:
-                generate_clicked = st.button("⚡ Generate Estimate", type="primary", width="stretch")
-
-            # Handle Generation Action
-            if generate_clicked:
-                valid_name, err_name = billing.validate_patient_name(patient_name)
-                if not valid_name:
-                    st.error(f"❌ {err_name}")
-                elif not selected_doctor or not selected_procedure:
-                    st.error("❌ Please select a valid doctor and procedure for this department.")
-                else:
-                    est_result = billing.calculate_estimate(
-                        patient_name=patient_name,
-                        stay_days=stay_days,
-                        room_type=selected_room,
-                        doctor=selected_doctor,
-                        procedure=selected_procedure,
-                        department=selected_dept,
-                        discount_pct=discount_pct,
-                        settings=settings,
-                        remarks=remarks,
-                    )
-                    st.session_state["active_estimate"] = est_result
-                    st.session_state["saved_estimate_number"] = None
-                    st.session_state["inputs_dirty"] = False
-
-            # Render Estimate if available in session_state
-            active_est = st.session_state.get("active_estimate")
-            if active_est:
-                st.divider()
-
-                # Warning banner if inputs modified after generation
-                if st.session_state.get("inputs_dirty"):
-                    st.warning("⚠️ **Notice:** You have modified input fields since this estimate was generated. Click **'Generate Estimate'** to recalculate before saving or downloading.")
-
-                saved_num = st.session_state.get("saved_estimate_number")
-                if saved_num:
-                    st.success(f"✅ **Estimate Saved to Database:** Record Number **{saved_num}**")
-
-                st.subheader("📋 Itemized Estimate Breakdown")
-
-                # Metric Tiles
-                m1, m2, m3, m4, m5 = st.columns(5)
-                m1.metric("Gross Subtotal", billing.format_inr(active_est.subtotal))
-                m2.metric(
-                    f"Discount ({active_est.discount_pct}%)",
-                    f"-{billing.format_inr(active_est.discount_amount)}",
-                )
-                m3.metric(
-                    f"Contingency ({active_est.contingency_pct}%)",
-                    billing.format_inr(active_est.contingency_amount),
-                )
-                m4.metric(
-                    f"Tax ({active_est.tax_pct}%)",
-                    billing.format_inr(active_est.tax_amount),
-                )
-                m5.metric(
-                    "ESTIMATED TOTAL",
-                    billing.format_inr(active_est.total_amount),
-                )
-
-                # Expected Range Banner
-                st.info(
-                    f"**Expected Cost Range (±{active_est.estimate_range_pct}%):** "
-                    f"**{billing.format_inr(active_est.min_estimate)}** — **{billing.format_inr(active_est.max_estimate)}**\n\n"
-                    "*(Accounts for potential variations in surgical supplies, length of stay, or medical management)*"
-                )
-
-                # Table of Line Items (using width='stretch')
-                table_records = []
-                for item in active_est.line_items:
-                    table_records.append(
-                        {
-                            "Category": item.category,
-                            "Description": item.description,
-                            "Quantity": f"{item.quantity:.0f}" if item.quantity == int(item.quantity) else str(item.quantity),
-                            "Unit Rate": billing.format_inr(item.unit_price),
-                            "Gross Amount": billing.format_inr(item.amount),
-                            "Discount": f"-{billing.format_inr(item.discount_amount)}" if item.discount_amount > Decimal("0") else "—",
-                            "Net Amount": billing.format_inr(item.net_amount),
-                            "Taxable": "Yes" if item.is_taxable else "No",
-                        }
-                    )
-
-                df = pd.DataFrame(table_records)
-                st.dataframe(df, width="stretch", hide_index=True)
-
-                st.markdown("<br/>", unsafe_allow_html=True)
-
-                # Action Buttons (Save & Download PDF)
-                btn_col1, btn_col2, btn_col3 = st.columns([1.5, 1.8, 3])
-
-                with btn_col1:
-                    save_disabled = bool(st.session_state.get("inputs_dirty") or st.session_state.get("saved_estimate_number"))
-                    save_btn_label = "💾 Save Estimate" if not st.session_state.get("saved_estimate_number") else "✅ Saved"
-                    if st.button(save_btn_label, disabled=save_disabled, type="primary", width="stretch"):
-                        # Generate unique atomic estimate number inside BEGIN IMMEDIATE
-                        est_number = database.get_next_estimate_number(conn)
-                        active_est.estimate_number = est_number
-                        active_est.created_at = datetime.now().isoformat()
-                        snapshot = active_est.to_snapshot_dict()
-
-                        # Store in database
-                        save_data = {
-                            "estimate_number": est_number,
-                            "patient_name": active_est.patient_name,
-                            "room_type_id": selected_room["id"] if selected_room else None,
-                            "department_id": selected_dept["id"] if selected_dept else None,
-                            "doctor_id": selected_doctor["id"] if selected_doctor else None,
-                            "procedure_id": selected_procedure["id"] if selected_procedure else None,
-                            "stay_days": active_est.stay_days,
-                            "discount_pct": str(active_est.discount_pct),
-                            "subtotal": str(active_est.subtotal),
-                            "discount_amount": str(active_est.discount_amount),
-                            "contingency_amount": str(active_est.contingency_amount),
-                            "tax_amount": str(active_est.tax_amount),
-                            "total_amount": str(active_est.total_amount),
-                            "min_estimate": str(active_est.min_estimate),
-                            "max_estimate": str(active_est.max_estimate),
-                            "line_items_json": snapshot,
-                            "remarks": active_est.remarks,
-                            "created_at": active_est.created_at,
-                        }
-                        database.save_estimate(conn, save_data)
-                        st.session_state["saved_estimate_number"] = est_number
+                with col_rev_btn:
+                    if st.button("❌ Cancel Revision", key="cancel_rev_btn", width="stretch"):
+                        st.session_state["revision_source"] = None
+                        st.session_state["active_estimate"] = None
+                        st.session_state["saved_estimate_number"] = None
                         st.rerun()
 
-                with btn_col2:
-                    is_draft = st.session_state.get("saved_estimate_number") is None
-                    pdf_bytes = pdf_generator.generate_estimate_pdf(active_est, is_draft=is_draft)
-                    file_label = f"Hospital_Estimate_{st.session_state.get('saved_estimate_number') or 'DRAFT'}.pdf"
-                    st.download_button(
-                        label="📄 Download PDF Letterhead",
-                        data=pdf_bytes,
-                        file_name=file_label,
-                        mime="application/pdf",
-                        disabled=bool(st.session_state.get("inputs_dirty")),
-                        width="stretch",
+            # Master Data Lookups (Active records only)
+            all_rooms = database.get_room_types(conn, active_only=True)
+            all_departments = database.get_departments(conn, active_only=True)
+
+            if not all_rooms:
+                st.error("❌ No active room categories configured. Please configure room categories in the Admin Portal.")
+            if not all_departments:
+                st.error("❌ No active departments configured. Please configure departments in the Admin Portal.")
+
+            can_generate = bool(all_rooms and all_departments)
+
+            if can_generate:
+                # Top Row: Patient Name, UHID, Mobile & Room Category
+                col_p1, col_p2, col_p3, col_p4 = st.columns([1.8, 1.1, 1.2, 1.6])
+                with col_p1:
+                    patient_name = st.text_input(
+                        "Patient Full Name *",
+                        placeholder="e.g. Rahul Sharma",
+                        key="input_patient_name",
+                        on_change=mark_inputs_changed,
+                    )
+                with col_p2:
+                    uhid = st.text_input(
+                        "UHID No.",
+                        placeholder="e.g. UH-001234",
+                        key="input_uhid",
+                        on_change=mark_inputs_changed,
+                    )
+                with col_p3:
+                    mobile_number = st.text_input(
+                        "Mobile No.",
+                        placeholder="e.g. 9876543210 (India)",
+                        key="input_mobile",
+                        on_change=mark_inputs_changed,
+                    )
+                with col_p4:
+                    room_options = {r["id"]: r for r in all_rooms}
+                    room_keys = list(room_options.keys())
+                    selected_room_id = st.selectbox(
+                        "Room Category *",
+                        options=room_keys,
+                        format_func=lambda rid: f"{room_options[rid]['name']} — {billing.format_inr(room_options[rid]['daily_rate'], whole_rupees=True)}/day",
+                        key="input_room_id",
+                        on_change=mark_inputs_changed,
+                    )
+                    selected_room = room_options.get(selected_room_id)
+
+                # Cascading Dropdowns: Department -> Doctor & Procedure
+                st.subheader("Clinical Consultation & Procedure")
+                col_c1, col_c2, col_c3 = st.columns([1.5, 1.5, 2])
+
+                with col_c1:
+                    dept_options = {d["id"]: d for d in all_departments}
+                    dept_keys = list(dept_options.keys())
+                    selected_dept_id = st.selectbox(
+                        "Department *",
+                        options=dept_keys,
+                        format_func=lambda did: dept_options[did]["name"],
+                        key="input_dept_id",
+                        on_change=mark_inputs_changed,
+                    )
+                    selected_dept = dept_options.get(selected_dept_id)
+
+                dept_doctors = database.get_doctors(conn, department_id=selected_dept_id, active_only=True)
+                dept_procedures = database.get_procedures(conn, department_id=selected_dept_id, active_only=True)
+
+                with col_c2:
+                    if not dept_doctors:
+                        st.warning("⚠️ No active doctors configured in this department.")
+                        selected_doctor = None
+                    else:
+                        doc_options = {doc["id"]: doc for doc in dept_doctors}
+                        selected_doc_id = st.selectbox(
+                            "Attending Doctor / Specialist *",
+                            options=list(doc_options.keys()),
+                            format_func=lambda did: f"{doc_options[did]['name']} ({doc_options[did]['specialization']} — Fee: {billing.format_inr(doc_options[did]['consultation_fee'], whole_rupees=True)}, {doc_options[did]['surgeon_fee_pct']}% fee)",
+                            key="input_doc_id",
+                            on_change=mark_inputs_changed,
+                        )
+                        selected_doctor = doc_options.get(selected_doc_id)
+
+                with col_c3:
+                    if not dept_procedures:
+                        st.warning("⚠️ No active procedures configured in this department.")
+                        selected_procedure = None
+                    else:
+                        proc_options = {p["id"]: p for p in dept_procedures}
+                        selected_proc_id = st.selectbox(
+                            "Surgical / Medical Procedure *",
+                            options=list(proc_options.keys()),
+                            format_func=lambda pid: f"{proc_options[pid]['name']} (Base: {billing.format_inr(proc_options[pid]['base_cost'], whole_rupees=True)})",
+                            key="input_proc_id",
+                            on_change=mark_inputs_changed,
+                        )
+                        selected_procedure = proc_options.get(selected_proc_id)
+
+                # Update Length of Stay default if procedure changed
+                if selected_procedure:
+                    proc_current_id = selected_procedure["id"]
+                    if st.session_state["last_proc_id"] != proc_current_id:
+                        if not st.session_state.get("revision_source"):
+                            st.session_state["input_stay_days"] = selected_procedure["default_stay_days"]
+                        st.session_state["last_proc_id"] = proc_current_id
+                        st.session_state["inputs_dirty"] = True
+
+                # Adjustments & Remarks Row
+                col_o1, col_o2, col_o3 = st.columns([1.2, 1.2, 2.5])
+                with col_o1:
+                    stay_days = st.number_input(
+                        "Length of Stay (Days) *",
+                        min_value=0,
+                        max_value=365,
+                        help="Default stay for this procedure. Enter 0 for Day Care / OPD surgery.",
+                        key="input_stay_days",
+                        on_change=mark_inputs_changed,
+                    )
+                with col_o2:
+                    discount_pct = st.number_input(
+                        "Special Discount (%)",
+                        min_value=0.0,
+                        max_value=100.0,
+                        value=0.0,
+                        step=1.0,
+                        help="Proportionally allocated across all line items.",
+                        key="input_discount_pct",
+                        on_change=mark_inputs_changed,
+                    )
+                with col_o3:
+                    remarks = st.text_input(
+                        "Remarks / Specific Clinical Notes",
+                        placeholder="e.g. High-risk cardiac history, robotic assistance",
+                        key="input_remarks",
+                        on_change=mark_inputs_changed,
                     )
 
-                with btn_col3:
-                    if is_draft:
-                        st.caption("ℹ️ *PDF downloaded now will be marked **DRAFT - NOT SAVED**. Save the estimate to generate a permanent estimate number.*")
+                # Advanced Price Overrides Expander (Maximum Flexibility for Editing)
+                with st.expander("⚙️ Price & Tariff Overrides (Edit Specific Prices)", expanded=bool(st.session_state.get("revision_source"))):
+                    st.caption("Override any catalog tariffs for this estimate. Leave blank to use standard master rates.")
+                    ov1, ov2, ov3, ov4 = st.columns(4)
+                    with ov1:
+                        ov_room_rate = st.text_input(
+                            "Room Daily Rate (₹)",
+                            placeholder=str(selected_room["daily_rate"]) if selected_room else "",
+                            key="ov_room_rate",
+                            on_change=mark_inputs_changed,
+                        )
+                    with ov2:
+                        ov_base_cost = st.text_input(
+                            "Procedure Base Cost (₹)",
+                            placeholder=str(selected_procedure["base_cost"]) if selected_procedure else "",
+                            key="ov_base_cost",
+                            on_change=mark_inputs_changed,
+                        )
+                    with ov3:
+                        ov_surgeon_pct = st.text_input(
+                            "Surgeon Fee (%)",
+                            placeholder=str(selected_doctor["surgeon_fee_pct"]) if selected_doctor else "",
+                            key="ov_surgeon_pct",
+                            on_change=mark_inputs_changed,
+                        )
+                    with ov4:
+                        ov_ot = st.text_input(
+                            "OT Charge (₹)",
+                            placeholder=str(selected_procedure["ot_charge"]) if selected_procedure else "",
+                            key="ov_ot",
+                            on_change=mark_inputs_changed,
+                        )
+
+                    ov5, ov6, ov7 = st.columns(3)
+                    with ov5:
+                        ov_anaes = st.text_input(
+                            "Anaesthesia Charge (₹)",
+                            placeholder=str(selected_procedure["anaesthesia_charge"]) if selected_procedure else "",
+                            key="ov_anaes",
+                            on_change=mark_inputs_changed,
+                        )
+                    with ov6:
+                        ov_cons = st.text_input(
+                            "Consumables & Implants (₹)",
+                            placeholder=str(selected_procedure["consumables_cost"]) if selected_procedure else "",
+                            key="ov_cons",
+                            on_change=mark_inputs_changed,
+                        )
+                    with ov7:
+                        ov_inv = st.text_input(
+                            "Investigations Charge (₹)",
+                            placeholder=str(selected_procedure["investigations_charge"]) if selected_procedure else "",
+                            key="ov_inv",
+                            on_change=mark_inputs_changed,
+                        )
+
+                st.markdown("<br/>", unsafe_allow_html=True)
+                col_act1, col_act2 = st.columns([1.5, 4])
+                with col_act1:
+                    generate_clicked = st.button("⚡ Generate Estimate", type="primary", width="stretch")
+
+                # Handle Generation Action
+                if generate_clicked:
+                    valid_name, err_name = billing.validate_patient_name(patient_name)
+                    valid_mobile, err_mobile = billing.validate_mobile_number(mobile_number)
+                    if not valid_name:
+                        st.error(f"❌ {err_name}")
+                    elif not valid_mobile:
+                        st.error(f"❌ {err_mobile}")
+                    elif not selected_doctor or not selected_procedure:
+                        st.error("❌ Please select a valid doctor and procedure for this department.")
                     else:
-                        st.caption(f"ℹ️ *Estimate saved with permanent number **{st.session_state['saved_estimate_number']}**.*")
+                        calc_room = dict(selected_room)
+                        if ov_room_rate.strip():
+                            v, dec, e = billing.validate_whole_rupee_field(ov_room_rate, "Room Daily Rate")
+                            if v:
+                                calc_room["daily_rate"] = dec
+                            else:
+                                st.error(e)
+                                calc_room = None
+
+                        calc_proc = dict(selected_procedure)
+                        if calc_room and ov_base_cost.strip():
+                            v, dec, e = billing.validate_whole_rupee_field(ov_base_cost, "Base Cost")
+                            if v:
+                                calc_proc["base_cost"] = dec
+                            else:
+                                st.error(e)
+                                calc_proc = None
+                        if calc_proc and ov_ot.strip():
+                            v, dec, e = billing.validate_whole_rupee_field(ov_ot, "OT Charge")
+                            if v:
+                                calc_proc["ot_charge"] = dec
+                            else:
+                                st.error(e)
+                                calc_proc = None
+                        if calc_proc and ov_anaes.strip():
+                            v, dec, e = billing.validate_whole_rupee_field(ov_anaes, "Anaesthesia Charge")
+                            if v:
+                                calc_proc["anaesthesia_charge"] = dec
+                            else:
+                                st.error(e)
+                                calc_proc = None
+                        if calc_proc and ov_cons.strip():
+                            v, dec, e = billing.validate_whole_rupee_field(ov_cons, "Consumables Cost")
+                            if v:
+                                calc_proc["consumables_cost"] = dec
+                            else:
+                                st.error(e)
+                                calc_proc = None
+                        if calc_proc and ov_inv.strip():
+                            v, dec, e = billing.validate_whole_rupee_field(ov_inv, "Investigations Charge")
+                            if v:
+                                calc_proc["investigations_charge"] = dec
+                            else:
+                                st.error(e)
+                                calc_proc = None
+
+                        calc_doc = dict(selected_doctor)
+                        if calc_room and calc_proc and ov_surgeon_pct.strip():
+                            v, dec, e = billing.validate_whole_percentage_field(ov_surgeon_pct, "Surgeon Fee (%)")
+                            if v:
+                                calc_doc["surgeon_fee_pct"] = dec
+                            else:
+                                st.error(e)
+                                calc_doc = None
+
+                        if calc_room and calc_proc and calc_doc:
+                            est_result = billing.calculate_estimate(
+                                patient_name=patient_name,
+                                stay_days=stay_days,
+                                room_type=calc_room,
+                                doctor=calc_doc,
+                                procedure=calc_proc,
+                                department=selected_dept,
+                                discount_pct=discount_pct,
+                                settings=settings,
+                                remarks=remarks,
+                            )
+                            est_result.mobile_number = mobile_number.strip()
+                            est_result.uhid = uhid.strip()
+                            st.session_state["active_estimate"] = est_result
+                            st.session_state["saved_estimate_number"] = None
+                            st.session_state["inputs_dirty"] = False
+
+                # Render Estimate Breakdown
+                active_est = st.session_state.get("active_estimate")
+                if active_est:
+                    st.divider()
+
+                    if st.session_state.get("inputs_dirty"):
+                        st.warning("⚠️ **Notice:** Input fields have been modified since this estimate was generated. Click **'Generate Estimate'** to recalculate before saving or downloading.")
+
+                    saved_num = st.session_state.get("saved_estimate_number")
+                    if saved_num:
+                        st.success(f"✅ **Estimate Saved to Database:** Record Number **{saved_num}**")
+
+                    st.subheader("📋 Itemized Estimate Breakdown")
+
+                    m1, m2, m3, m4, m5 = st.columns(5)
+                    m1.metric("Gross Subtotal", billing.format_inr(active_est.subtotal))
+                    m2.metric(
+                        f"Discount ({active_est.discount_pct}%)",
+                        f"-{billing.format_inr(active_est.discount_amount)}",
+                    )
+                    m3.metric(
+                        f"Contingency ({active_est.contingency_pct}%)",
+                        billing.format_inr(active_est.contingency_amount),
+                    )
+                    m4.metric(
+                        f"Tax ({active_est.tax_pct}%)",
+                        billing.format_inr(active_est.tax_amount),
+                    )
+                    m5.metric(
+                        "ESTIMATED TOTAL",
+                        billing.format_inr(active_est.total_amount),
+                    )
+
+                    st.info(
+                        f"**Expected Cost Range (±{active_est.estimate_range_pct}%):** "
+                        f"**{billing.format_inr(active_est.min_estimate)}** — **{billing.format_inr(active_est.max_estimate)}**\n\n"
+                        "*(Accounts for potential variations in surgical supplies, length of stay, or medical management)*"
+                    )
+
+                    table_records = []
+                    for item in active_est.line_items:
+                        table_records.append(
+                            {
+                                "Category": item.category,
+                                "Description": item.description,
+                                "Quantity": f"{item.quantity:.0f}" if item.quantity == int(item.quantity) else str(item.quantity),
+                                "Unit Rate": billing.format_inr(item.unit_price),
+                                "Gross Amount": billing.format_inr(item.amount),
+                                "Discount": f"-{billing.format_inr(item.discount_amount)}" if item.discount_amount > Decimal("0") else "—",
+                                "Net Amount": billing.format_inr(item.net_amount),
+                                "Taxable": "Yes" if item.is_taxable else "No",
+                            }
+                        )
+                    st.dataframe(pd.DataFrame(table_records), width="stretch", hide_index=True)
+
+                    # Comparative Estimate (Feature 3: Next Room Tier)
+                    all_rooms_sorted = sorted(all_rooms, key=lambda r: r["daily_rate"])
+                    cur_room_idx = next((i for i, r in enumerate(all_rooms_sorted) if r["id"] == selected_room["id"]), None)
+                    superior_room = (
+                        all_rooms_sorted[cur_room_idx + 1]
+                        if cur_room_idx is not None and cur_room_idx + 1 < len(all_rooms_sorted)
+                        else None
+                    )
+
+                    with st.expander("📊 Comparative Estimate — Superior Room Category (Upgrade Option)", expanded=False):
+                        if superior_room:
+                            superior_est = billing.calculate_estimate(
+                                patient_name=active_est.patient_name,
+                                stay_days=active_est.stay_days,
+                                room_type=superior_room,
+                                doctor=selected_doctor,
+                                procedure=selected_procedure,
+                                department=selected_dept,
+                                discount_pct=active_est.discount_pct,
+                                settings=settings,
+                                remarks=active_est.remarks,
+                            )
+                            diff_total = superior_est.total_amount - active_est.total_amount
+                            c_u1, c_u2, c_u3 = st.columns(3)
+                            c_u1.metric(
+                                f"Current: {active_est.room_type_name}",
+                                billing.format_inr(active_est.total_amount),
+                                f"{billing.format_inr(active_est.room_daily_rate, whole_rupees=True)}/day",
+                            )
+                            c_u2.metric(
+                                f"Upgrade: {superior_est.room_type_name}",
+                                billing.format_inr(superior_est.total_amount),
+                                f"{billing.format_inr(superior_est.room_daily_rate, whole_rupees=True)}/day",
+                            )
+                            c_u3.metric(
+                                "Total Upgrade Difference",
+                                f"+{billing.format_inr(diff_total)}",
+                                f"+{billing.format_inr(superior_est.room_daily_rate - active_est.room_daily_rate, whole_rupees=True)}/day room diff",
+                            )
+
+                            st.write("**Comparative Category-by-Category Analysis:**")
+                            comp_rows = []
+                            for cur_i, up_i in zip(active_est.line_items, superior_est.line_items):
+                                d_amt = up_i.net_amount - cur_i.net_amount
+                                d_str = f"+{billing.format_inr(d_amt)}" if d_amt > Decimal("0") else ("—" if d_amt == Decimal("0") else billing.format_inr(d_amt))
+                                comp_rows.append({
+                                    "Billing Component": cur_i.category,
+                                    f"Current Tier ({active_est.room_type_name})": billing.format_inr(cur_i.net_amount),
+                                    f"Upgrade Tier ({superior_est.room_type_name})": billing.format_inr(up_i.net_amount),
+                                    "Difference": d_str,
+                                })
+                            comp_rows.append({
+                                "Billing Component": "CONTINGENCY BUFFER",
+                                f"Current Tier ({active_est.room_type_name})": billing.format_inr(active_est.contingency_amount),
+                                f"Upgrade Tier ({superior_est.room_type_name})": billing.format_inr(superior_est.contingency_amount),
+                                "Difference": f"+{billing.format_inr(superior_est.contingency_amount - active_est.contingency_amount)}",
+                            })
+                            comp_rows.append({
+                                "Billing Component": "TAX / GST",
+                                f"Current Tier ({active_est.room_type_name})": billing.format_inr(active_est.tax_amount),
+                                f"Upgrade Tier ({superior_est.room_type_name})": billing.format_inr(superior_est.tax_amount),
+                                "Difference": f"+{billing.format_inr(superior_est.tax_amount - active_est.tax_amount)}",
+                            })
+                            comp_rows.append({
+                                "Billing Component": "TOTAL ESTIMATED AMOUNT",
+                                f"Current Tier ({active_est.room_type_name})": billing.format_inr(active_est.total_amount),
+                                f"Upgrade Tier ({superior_est.room_type_name})": billing.format_inr(superior_est.total_amount),
+                                "Difference": f"+{billing.format_inr(diff_total)}",
+                            })
+                            st.dataframe(pd.DataFrame(comp_rows), width="stretch", hide_index=True)
+                            st.caption("ℹ️ *Comparative estimate is for patient financial counseling only. Only the primary estimate can be saved to records.*")
+                        else:
+                            st.info("ℹ️ The selected room category is already the highest tier available. No higher comparative tier applicable.")
+
+                    st.markdown("<br/>", unsafe_allow_html=True)
+
+                    # Action Buttons (Save & Download PDF)
+                    btn_col1, btn_col2, btn_col3 = st.columns([1.5, 1.8, 3])
+
+                    with btn_col1:
+                        save_disabled = bool(st.session_state.get("inputs_dirty") or st.session_state.get("saved_estimate_number"))
+                        save_btn_label = "💾 Save Estimate" if not st.session_state.get("saved_estimate_number") else "✅ Saved"
+                        if st.button(save_btn_label, disabled=save_disabled, type="primary", width="stretch"):
+                            rev_source = st.session_state.get("revision_source")
+                            if rev_source:
+                                est_number = database.get_next_revision_number(conn, rev_source["estimate_number"])
+                                revision_of = rev_source.get("revision_of") or rev_source["estimate_number"]
+                            else:
+                                est_number = database.get_next_estimate_number(conn)
+                                revision_of = None
+
+                            active_est.estimate_number = est_number
+                            active_est.created_at = datetime.now().isoformat()
+                            snapshot = active_est.to_snapshot_dict()
+
+                            save_data = {
+                                "estimate_number": est_number,
+                                "patient_name": active_est.patient_name,
+                                "room_type_id": selected_room["id"] if selected_room else None,
+                                "department_id": selected_dept["id"] if selected_dept else None,
+                                "doctor_id": selected_doctor["id"] if selected_doctor else None,
+                                "procedure_id": selected_procedure["id"] if selected_procedure else None,
+                                "stay_days": active_est.stay_days,
+                                "discount_pct": str(active_est.discount_pct),
+                                "subtotal": str(active_est.subtotal),
+                                "discount_amount": str(active_est.discount_amount),
+                                "contingency_amount": str(active_est.contingency_amount),
+                                "tax_amount": str(active_est.tax_amount),
+                                "total_amount": str(active_est.total_amount),
+                                "min_estimate": str(active_est.min_estimate),
+                                "max_estimate": str(active_est.max_estimate),
+                                "line_items_json": snapshot,
+                                "remarks": active_est.remarks,
+                                "created_at": active_est.created_at,
+                                "mobile_number": active_est.mobile_number,
+                                "uhid": active_est.uhid,
+                                "revision_of": revision_of,
+                            }
+                            database.save_estimate(conn, save_data)
+                            st.session_state["saved_estimate_number"] = est_number
+                            st.session_state["revision_source"] = None
+                            st.rerun()
+
+                    with btn_col2:
+                        is_draft = st.session_state.get("saved_estimate_number") is None
+                        pdf_bytes = pdf_generator.generate_estimate_pdf(active_est, is_draft=is_draft)
+
+                        # Feature 6: Standardized naming template {PatientName}_{UHID}_{EstimateNumber}.pdf
+                        safe_name = re.sub(r'[^\w\-]', '_', active_est.patient_name.strip())[:30] or "Patient"
+                        safe_uhid = re.sub(r'[^\w\-]', '_', (active_est.uhid or "").strip() or "NoUHID")[:15]
+                        est_num_label = st.session_state.get('saved_estimate_number') or 'DRAFT'
+                        file_label = f"{safe_name}_{safe_uhid}_{est_num_label}.pdf"
+
+                        st.download_button(
+                            label="📄 Download PDF Letterhead",
+                            data=pdf_bytes,
+                            file_name=file_label,
+                            mime="application/pdf",
+                            disabled=bool(st.session_state.get("inputs_dirty")),
+                            width="stretch",
+                        )
+
+                    with btn_col3:
+                        if is_draft:
+                            st.caption("ℹ️ *PDF downloaded now will be marked **DRAFT - NOT SAVED**. Save the estimate to assign a permanent estimate number.*")
+                        else:
+                            st.caption(f"ℹ️ *Estimate saved with permanent number **{st.session_state['saved_estimate_number']}**.*")
 
     # ==========================================================================
     # VIEW 2: ESTIMATE HISTORY & REPRINT
     # ==========================================================================
     elif navigation_option == "📋 Estimate History":
         st.header("📋 Estimate Records & Historical Reprint")
-        st.caption("Search past estimates, inspect itemized line items, and reprint PDF estimates directly from frozen snapshots.")
+        st.caption("Search past estimates, update conversion outcomes, revise records, and reprint frozen PDF snapshots.")
 
         # Search & Filter Controls
         col_s1, col_s2 = st.columns([3, 2])
         with col_s1:
             search_query = st.text_input(
-                "🔍 Search by Patient Name or Estimate #",
-                placeholder="e.g. Sharma or EST-2026...",
+                "🔍 Search by Patient Name, Estimate #, UHID, or Mobile",
+                placeholder="e.g. Sharma, UH-0012, or 98765...",
                 key="history_search_input",
             )
         with col_s2:
@@ -412,30 +692,33 @@ try:
         else:
             st.write(f"Showing **{len(estimates)}** estimate records:")
 
-            # Summary Table (using width='stretch')
             summary_rows = []
             for e in estimates:
                 summary_rows.append(
                     {
                         "Estimate Number": e["estimate_number"],
+                        "Revision Of": e.get("revision_of") or "—",
                         "Date": format_history_timestamp(e.get("created_at")),
                         "Patient Name": e["patient_name"],
+                        "UHID": e.get("uhid") or "—",
+                        "Mobile": e.get("mobile_number") or "—",
                         "Department": e.get("department_name") or "—",
                         "Procedure": e.get("procedure_name") or "—",
                         "Doctor": e.get("doctor_name") or "—",
                         "Room Category": e.get("room_type_name") or "—",
                         "Total Amount": billing.format_inr(e["total_amount"]),
+                        "Converted": "Yes" if e.get("converted") == 1 else "No",
+                        "Actual Bill": billing.format_inr(e["actual_amount"]) if e.get("actual_amount") else "—",
                     }
                 )
             st.dataframe(pd.DataFrame(summary_rows), width="stretch", hide_index=True)
 
             st.divider()
-            st.subheader("🔍 Inspect & Reprint Historical Estimate")
+            st.subheader("🔍 Inspect, Revise & Update Historical Estimate")
 
-            # Selectbox to pick an estimate to view in detail
             est_map = {e["estimate_number"]: e for e in estimates}
             selected_est_num = st.selectbox(
-                "Select Estimate Record to View Details / Reprint",
+                "Select Estimate Record to Inspect Details / Update Outcome",
                 options=list(est_map.keys()),
                 key="history_selected_est",
             )
@@ -457,20 +740,25 @@ try:
                 fin_info = snapshot.get("financials", {})
                 stored_items = snapshot.get("line_items", [])
 
-                # Alert box highlighting immutability (without <br/>)
                 est_created_dt = format_history_timestamp(meta.get("created_at") or sel_record.get("created_at"))
                 st.info(
                     f"🔒 **Immutable Historical Record:** Estimate **{selected_est_num}** generated on **{est_created_dt}**.\n\n"
-                    "*This estimate is rendered from a frozen snapshot. Future changes to master room, procedure, or doctor prices do NOT alter this estimate.*",
+                    "*Rendered from a frozen snapshot. Future changes to master room, procedure, or doctor prices do NOT alter this estimate.*",
                     icon="ℹ️",
                 )
 
                 # Metadata display
                 c1, c2, c3, c4 = st.columns(4)
                 c1.markdown(f"**Patient:** {patient_info.get('name', sel_record['patient_name'])}")
-                c2.markdown(f"**Department:** {clinical_info.get('department', sel_record.get('department_name'))}")
-                c3.markdown(f"**Doctor:** {clinical_info.get('doctor', sel_record.get('doctor_name'))}")
-                c4.markdown(f"**Procedure:** {clinical_info.get('procedure', sel_record.get('procedure_name'))}")
+                c2.markdown(f"**UHID:** {patient_info.get('uhid') or sel_record.get('uhid') or '—'}")
+                c3.markdown(f"**Mobile:** {patient_info.get('mobile_number') or sel_record.get('mobile_number') or '—'}")
+                c4.markdown(f"**Department:** {clinical_info.get('department', sel_record.get('department_name'))}")
+
+                c5, c6, c7, c8 = st.columns(4)
+                c5.markdown(f"**Doctor:** {clinical_info.get('doctor', sel_record.get('doctor_name'))}")
+                c6.markdown(f"**Procedure:** {clinical_info.get('procedure', sel_record.get('procedure_name'))}")
+                c7.markdown(f"**Room:** {clinical_info.get('room_type', sel_record.get('room_type_name'))}")
+                c8.markdown(f"**Revision Of:** {sel_record.get('revision_of') or 'None (Original)'}")
 
                 # Metric tiles from frozen snapshot
                 m1, m2, m3, m4, m5 = st.columns(5)
@@ -488,7 +776,6 @@ try:
                 )
                 m5.metric("TOTAL AMOUNT", billing.format_inr(fin_info.get("total_amount", sel_record["total_amount"])))
 
-                # Range band
                 min_e = billing.format_inr(fin_info.get("min_estimate", sel_record["min_estimate"]))
                 max_e = billing.format_inr(fin_info.get("max_estimate", sel_record["max_estimate"]))
                 rng_p = fin_info.get("estimate_range_pct", "10")
@@ -515,18 +802,204 @@ try:
                         )
                     st.dataframe(pd.DataFrame(table_data), width="stretch", hide_index=True)
 
-                # Reprint PDF Button
-                col_pdf, _ = st.columns([2, 4])
+                # Feature 5: Update Treatment Outcome & Final Bill Amount
+                with st.expander("📝 Update Treatment Outcome & Final Bill Amount", expanded=True):
+                    col_out1, col_out2, col_out3 = st.columns([1.5, 2, 1.5])
+                    with col_out1:
+                        is_conv = st.checkbox(
+                            "Patient Accepted Treatment (Converted)",
+                            value=bool(sel_record.get("converted", 0)),
+                            key=f"conv_toggle_{selected_est_num}",
+                        )
+                    with col_out2:
+                        act_bill = st.text_input(
+                            "Final Actual Bill Amount (₹)",
+                            value=str(sel_record.get("actual_amount") or ""),
+                            placeholder="e.g. 150000",
+                            key=f"act_bill_{selected_est_num}",
+                        )
+                    with col_out3:
+                        st.markdown("<br/>", unsafe_allow_html=True)
+                        if st.button("💾 Save Outcome", key=f"save_outcome_{selected_est_num}", width="stretch"):
+                            if act_bill.strip():
+                                v_act, d_act, err_act = billing.validate_money_field(act_bill, "Actual Bill Amount")
+                                if not v_act:
+                                    st.error(err_act)
+                                else:
+                                    database.update_estimate_outcome(conn, selected_est_num, is_conv, str(d_act))
+                                    st.success("✅ Treatment outcome & actual bill updated.")
+                                    st.rerun()
+                            else:
+                                database.update_estimate_outcome(conn, selected_est_num, is_conv, None)
+                                st.success("✅ Treatment outcome updated.")
+                                st.rerun()
+
+                    if sel_record.get("actual_amount"):
+                        acc = billing.calculate_accuracy(sel_record["total_amount"], sel_record["actual_amount"])
+                        if acc is not None:
+                            st.info(f"📊 **Accuracy Variance:** **{acc:.2f}%** variance (|Actual − Estimated| ÷ Actual × 100%) against estimated {billing.format_inr(sel_record['total_amount'])}.")
+
+                # Action Buttons: Reprint PDF & Edit/Revise
+                col_pdf, col_rev = st.columns([2, 2])
                 with col_pdf:
                     reprint_pdf_bytes = pdf_generator.generate_estimate_pdf(snapshot, is_draft=False)
+                    p_name = snapshot.get("patient", {}).get("name") or sel_record["patient_name"]
+                    p_uhid = snapshot.get("patient", {}).get("uhid") or sel_record.get("uhid") or "NoUHID"
+                    safe_name = re.sub(r'[^\w\-]', '_', str(p_name).strip())[:30] or "Patient"
+                    safe_uhid = re.sub(r'[^\w\-]', '_', str(p_uhid).strip())[:15]
+                    reprint_fname = f"{safe_name}_{safe_uhid}_{selected_est_num}.pdf"
                     st.download_button(
                         label=f"📄 Reprint PDF ({selected_est_num})",
                         data=reprint_pdf_bytes,
-                        file_name=f"Estimate_{selected_est_num}.pdf",
+                        file_name=reprint_fname,
                         mime="application/pdf",
                         width="stretch",
                         key="btn_reprint_pdf",
                     )
+                with col_rev:
+                    # Feature 4: Allow estimate to be edited once created
+                    if st.button("✏️ Revise / Edit Estimate", width="stretch", key="btn_revise_est", type="secondary"):
+                        st.session_state["revision_source"] = sel_record
+                        st.session_state["input_patient_name"] = sel_record["patient_name"]
+                        st.session_state["input_uhid"] = sel_record.get("uhid") or ""
+                        st.session_state["input_mobile"] = sel_record.get("mobile_number") or ""
+                        st.session_state["input_room_id"] = sel_record["room_type_id"]
+                        st.session_state["input_dept_id"] = sel_record["department_id"]
+                        st.session_state["input_doc_id"] = sel_record["doctor_id"]
+                        st.session_state["input_proc_id"] = sel_record["procedure_id"]
+                        st.session_state["input_stay_days"] = sel_record["stay_days"]
+                        st.session_state["input_discount_pct"] = float(sel_record["discount_pct"])
+                        st.session_state["input_remarks"] = sel_record.get("remarks") or ""
+                        st.session_state["active_estimate"] = None
+                        st.session_state["saved_estimate_number"] = None
+                        st.session_state["inputs_dirty"] = True
+                        st.session_state["nav_option"] = "🏥 Generate Estimate"
+                        st.rerun()
+
+    # ==========================================================================
+    # VIEW 3: DASHBOARD & EXCEL LEDGER
+    # ==========================================================================
+    elif navigation_option == "📊 Dashboard":
+        st.header("📊 Estimates Performance Dashboard & Analytics")
+        st.caption("Overview of estimates issued, patient conversion rates, forecasting accuracy, and complete ledger export.")
+
+        all_estimates = database.get_estimates(conn, limit=None)
+
+        if not all_estimates:
+            st.info("No estimates generated yet. Estimates saved in the Generator will appear here.")
+        else:
+            total_est_count = len(all_estimates)
+            total_est_value = sum(Decimal(str(e["total_amount"])) for e in all_estimates)
+            converted_list = [e for e in all_estimates if e.get("converted") == 1]
+            converted_count = len(converted_list)
+            conv_rate = (converted_count / total_est_count * 100.0) if total_est_count > 0 else 0.0
+            avg_est_value = total_est_value / Decimal(total_est_count) if total_est_count > 0 else Decimal(0)
+
+            accuracy_samples = []
+            for e in all_estimates:
+                act = e.get("actual_amount")
+                if act:
+                    acc = billing.calculate_accuracy(e["total_amount"], act)
+                    if acc is not None:
+                        accuracy_samples.append(acc)
+
+            avg_acc = (sum(accuracy_samples) / len(accuracy_samples)) if accuracy_samples else None
+
+            # 1. KPI Metric Row
+            k1, k2, k3, k4, k5 = st.columns(5)
+            k1.metric("Total Estimates", str(total_est_count))
+            k2.metric("Total Estimated Value", billing.format_inr(total_est_value, whole_rupees=True))
+            k3.metric("Patient Conversion", f"{converted_count} ({conv_rate:.1f}%)", help="Percentage of estimates where patient accepted treatment")
+            k4.metric("Average Estimate", billing.format_inr(avg_est_value, whole_rupees=True))
+            if avg_acc is not None:
+                k5.metric("Avg Variance (Accuracy)", f"{avg_acc:.2f}%", help="|Actual − Estimated| ÷ Actual × 100% across estimates with final bill entered")
+            else:
+                k5.metric("Avg Variance (Accuracy)", "—", help="Record final bill amounts in Estimate History to track forecasting variance")
+
+            st.divider()
+
+            # 2. Charts Row
+            c_ch1, c_ch2 = st.columns(2)
+            with c_ch1:
+                st.subheader("Department-wise Estimate Volume")
+                dept_counts: Dict[str, int] = {}
+                for e in all_estimates:
+                    d_name = e.get("department_name") or "Unassigned"
+                    dept_counts[d_name] = dept_counts.get(d_name, 0) + 1
+                df_dept = pd.DataFrame(list(dept_counts.items()), columns=["Department", "Estimates"]).set_index("Department")
+                st.bar_chart(df_dept)
+
+            with c_ch2:
+                st.subheader("Monthly Estimate Trend")
+                month_counts: Dict[str, int] = {}
+                for e in all_estimates:
+                    dt_str = e.get("created_at") or ""
+                    try:
+                        m_key = datetime.fromisoformat(dt_str).strftime("%Y-%m")
+                    except Exception:
+                        m_key = "Other"
+                    month_counts[m_key] = month_counts.get(m_key, 0) + 1
+                sorted_months = sorted(month_counts.keys())
+                df_month = pd.DataFrame([{"Month": m, "Estimates": month_counts[m]} for m in sorted_months]).set_index("Month")
+                st.bar_chart(df_month)
+
+            st.divider()
+
+            # 3. Excel Export & Full Running Ledger (Feature 7)
+            col_led_title, col_led_btn = st.columns([3, 2])
+            with col_led_title:
+                st.subheader("📋 Running Estimates Spreadsheet Database")
+            with col_led_btn:
+                excel_rows = []
+                for e in all_estimates:
+                    acc_val = billing.calculate_accuracy(e["total_amount"], e.get("actual_amount"))
+                    acc_text = f"{acc_val:.2f}%" if acc_val is not None else "—"
+                    excel_rows.append({
+                        "Estimate Number": e["estimate_number"],
+                        "Revision Of": e.get("revision_of") or "—",
+                        "Date": format_history_timestamp(e.get("created_at")),
+                        "Patient Name": e["patient_name"],
+                        "UHID": e.get("uhid") or "—",
+                        "Mobile Number": e.get("mobile_number") or "—",
+                        "Department": e.get("department_name") or "—",
+                        "Doctor": e.get("doctor_name") or "—",
+                        "Procedure": e.get("procedure_name") or "—",
+                        "Room Type": e.get("room_type_name") or "—",
+                        "Stay Days": e.get("stay_days", 1),
+                        "Subtotal (₹)": e.get("subtotal", 0),
+                        "Discount %": e.get("discount_pct", 0),
+                        "Discount Amount (₹)": e.get("discount_amount", 0),
+                        "Contingency (₹)": e.get("contingency_amount", 0),
+                        "Tax (₹)": e.get("tax_amount", 0),
+                        "Total Amount (₹)": e.get("total_amount", 0),
+                        "Min Range (₹)": e.get("min_estimate", 0),
+                        "Max Range (₹)": e.get("max_estimate", 0),
+                        "Converted": "Yes" if e.get("converted") == 1 else "No",
+                        "Actual Bill (₹)": e.get("actual_amount") or "—",
+                        "Accuracy Variance (%)": acc_text,
+                        "Remarks": e.get("remarks") or "",
+                    })
+
+                df_export = pd.DataFrame(excel_rows)
+                excel_buffer = io.BytesIO()
+                with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
+                    df_export.to_excel(writer, index=False, sheet_name="Estimates_Database")
+                    ws = writer.sheets["Estimates_Database"]
+                    for col in ws.columns:
+                        col_letter = col[0].column_letter
+                        max_len = max(len(str(cell.value or "")) for cell in col)
+                        ws.column_dimensions[col_letter].width = min(max(max_len + 3, 12), 40)
+
+                st.download_button(
+                    label="📥 Download Spreadsheet Database (.xlsx)",
+                    data=excel_buffer.getvalue(),
+                    file_name=f"Hospital_Estimates_Database_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    width="stretch",
+                    key="btn_download_excel_dashboard",
+                )
+
+            st.dataframe(df_export, width="stretch", hide_index=True)
 
     # ==========================================================================
     # VIEW 3: ADMIN PORTAL (Phase 6)

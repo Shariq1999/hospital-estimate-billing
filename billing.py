@@ -135,6 +135,8 @@ class EstimateResult:
     remarks: str = ""
     estimate_number: Optional[str] = None
     created_at: Optional[str] = None
+    mobile_number: str = ""
+    uhid: str = ""
 
     def to_snapshot_dict(self) -> Dict[str, Any]:
         """Produce the comprehensive immutable snapshot dictionary."""
@@ -154,6 +156,8 @@ class EstimateResult:
                 "name": self.patient_name,
                 "remarks": self.remarks,
                 "stay_days": self.stay_days,
+                "mobile_number": self.mobile_number,
+                "uhid": self.uhid,
             },
             "clinical": {
                 "department": self.department_name,
@@ -529,3 +533,41 @@ def validate_whole_percentage_field(val: Any, field_name: str, min_pct: int = 0,
         return True, int(dec), ""
     except Exception:
         return False, 0, f"Invalid percentage format for {field_name}."
+
+
+def validate_mobile_number(mobile: str) -> Tuple[bool, str]:
+    """
+    Validate mobile number: free-form string allowed for any country.
+    Can be empty/blank. If non-empty, must contain valid phone characters (digits, +, spaces, hyphens, brackets)
+    and at least 7 digits, max 25 chars.
+    """
+    s = mobile.strip()
+    if not s:
+        return True, ""
+    if len(s) > 25:
+        return False, "Mobile number cannot exceed 25 characters."
+    import re
+    if not re.match(r"^[\d\+\s\-\(\)\.]+$", s):
+        return False, "Mobile number contains invalid characters (digits, +, -, spaces, () allowed)."
+    digits = re.sub(r"\D", "", s)
+    if len(digits) < 7:
+        return False, "Mobile number must contain at least 7 digits."
+    return True, ""
+
+
+def calculate_accuracy(estimated_total: Any, actual_amount: Any) -> Optional[Decimal]:
+    """
+    Calculate estimate accuracy percentage: |actual - estimated| / actual * 100%.
+    Returns None if actual_amount is blank, zero, or non-numeric.
+    """
+    try:
+        est = to_decimal(estimated_total)
+        act = to_decimal(actual_amount)
+        if act <= Decimal("0"):
+            return None
+        diff = abs(act - est)
+        pct = quantize_money((diff / act) * Decimal("100.0"))
+        return pct
+    except Exception:
+        return None
+

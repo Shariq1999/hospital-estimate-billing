@@ -272,6 +272,8 @@ def generate_estimate_pdf(
     room_name = xml_escape(str(clinical.get("room_type", "N/A")))
     remarks_raw = patient.get("remarks")
     remarks_val = xml_escape(str(remarks_raw)) if remarks_raw else ""
+    uhid_val = xml_escape(str(patient.get("uhid") or ""))
+    mobile_val = xml_escape(str(patient.get("mobile_number") or ""))
 
     patient_info = [
         [
@@ -300,6 +302,16 @@ def generate_estimate_pdf(
             ),
         ],
     ]
+    # UHID and Mobile row (shown only when at least one is present)
+    if uhid_val or mobile_val:
+        patient_info.append(
+            [
+                Paragraph("<b>UHID:</b>", style_cell_bold),
+                Paragraph(uhid_val or "—", style_cell),
+                Paragraph("<b>Mobile Number:</b>", style_cell_bold),
+                Paragraph(mobile_val or "—", style_cell),
+            ]
+        )
     if remarks_val:
         patient_info.append(
             [
@@ -325,8 +337,10 @@ def generate_estimate_pdf(
             ]
         )
     )
+    # Span the remarks cell across columns 1-3 (last row)
     if remarks_val:
-        patient_table.setStyle(TableStyle([("SPAN", (1, 3), (3, 3))]))
+        remarks_row_idx = len(patient_info) - 1
+        patient_table.setStyle(TableStyle([("SPAN", (1, remarks_row_idx), (3, remarks_row_idx))]))
     story.append(patient_table)
     story.append(Spacer(1, 5 * mm))
 
