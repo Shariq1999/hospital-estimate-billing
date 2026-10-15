@@ -61,7 +61,7 @@ def test_app_first_run_admin_setup(monkeypatch):
     try:
         at = AppTest.from_file(APP_PATH, default_timeout=30)
         at.run()
-        at.sidebar.radio[0].set_value("⚙️ Admin Portal").run()
+        at.sidebar.radio[0].set_value("Admin Portal").run()
 
         # Should show first-run setup form with 3 text inputs and submit button
         assert len(at.text_input) == 3
@@ -94,7 +94,7 @@ def test_app_add_duplicate_department_shows_friendly_error(app_test_db):
     at.session_state["admin_authenticated"] = True
     at.session_state["admin_username"] = "admin"
     at.run()
-    at.sidebar.radio[0].set_value("⚙️ Admin Portal").run()
+    at.sidebar.radio[0].set_value("Admin Portal").run()
 
     # In Department tab (tab index 1)
     # Add form: text_input[0] is 'Department Name *', button[0] is '➕ Add Department'
@@ -113,7 +113,7 @@ def test_app_add_and_edit_doctor_and_procedure(app_test_db):
     at.session_state["admin_authenticated"] = True
     at.session_state["admin_username"] = "admin"
     at.run()
-    at.sidebar.radio[0].set_value("⚙️ Admin Portal").run()
+    at.sidebar.radio[0].set_value("Admin Portal").run()
 
     # --- 1. Add Doctor ---
     at.tabs[2].text_input[0].set_value("Dr. Test Surgeon")
@@ -199,7 +199,7 @@ def test_app_select_second_doctor_reloads_values_and_saving_without_changes_leav
     at.session_state["admin_authenticated"] = True
     at.session_state["admin_username"] = "admin"
     at.run()
-    at.sidebar.radio[0].set_value("⚙️ Admin Portal").run()
+    at.sidebar.radio[0].set_value("Admin Portal").run()
 
     doc_options = at.tabs[2].selectbox[1].options
     assert len(doc_options) >= 2
@@ -246,7 +246,7 @@ def test_app_csv_upload_preview_and_import(app_test_db):
     at.session_state["admin_authenticated"] = True
     at.session_state["admin_username"] = "admin"
     at.run()
-    at.sidebar.radio[0].set_value("⚙️ Admin Portal").run()
+    at.sidebar.radio[0].set_value("Admin Portal").run()
 
     # In CSV Import / Export tab (tab index 5)
     csv_bytes = b"name,is_active\nEndocrinology,1\nRheumatology,1\n"
@@ -279,7 +279,7 @@ def test_app_admin_edit_form_prevents_stale_values_across_record_selection(app_t
     at.session_state["admin_authenticated"] = True
     at.session_state["admin_username"] = "admin"
     at.run()
-    at.sidebar.radio[0].set_value("⚙️ Admin Portal").run()
+    at.sidebar.radio[0].set_value("Admin Portal").run()
 
     # --- 1. Doctor Edit Form Stale Value Check ---
     doc_options = at.tabs[2].selectbox[1].options

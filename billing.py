@@ -7,7 +7,7 @@ taxable item segregation, non-taxed contingency, and Indian Rupee (INR) formatti
 from __future__ import annotations
 
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Dict, List, Optional, Tuple
@@ -137,6 +137,9 @@ class EstimateResult:
     created_at: Optional[str] = None
     mobile_number: str = ""
     uhid: str = ""
+    surgeon_fee_type: str = "fixed"
+    surgeon_fee_amount: Decimal = Decimal("0.00")
+    comparative_estimates: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_snapshot_dict(self) -> Dict[str, Any]:
         """Produce the comprehensive immutable snapshot dictionary."""
@@ -163,6 +166,8 @@ class EstimateResult:
                 "department": self.department_name,
                 "doctor": self.doctor_name,
                 "surgeon_fee_pct": str(self.doctor_fee_pct),
+                "surgeon_fee_type": self.surgeon_fee_type,
+                "surgeon_fee_amount": str(self.surgeon_fee_amount),
                 "procedure": self.procedure_name,
                 "room_type": self.room_type_name,
                 "room_daily_rate": str(self.room_daily_rate),
@@ -183,6 +188,7 @@ class EstimateResult:
                 "max_estimate": str(self.max_estimate),
             },
             "line_items": [item.to_dict() for item in self.line_items],
+            "comparative_estimates": self.comparative_estimates,
         }
 
 
@@ -266,14 +272,17 @@ def calculate_estimate(
     discount_pct: Any = 0,
     settings: Optional[Dict[str, Any]] = None,
     remarks: str = "",
+    surgeon_fee_type: Optional[str] = None,
+    surgeon_fee_amount: Optional[Any] = None,
+    comparative_rooms: Optional[List[Dict[str, Any]]] = None,
 ) -> EstimateResult:
     """
     Pure calculation function producing an EstimateResult.
-    - Surgeon Fee = Procedure Base Cost * Doctor Surgeon Fee % / 100
+    - Surgeon Fee: Fixed Amount (INR) by default, or Percentage of Base Tariff.
     - Room Charges = Stay Days * Room Daily Rate (0 if stay_days == 0)
     - Contingency applies to post-discount net base and is not taxed
     - Tax applies to post-discount net of taxable lines (consumables, investigations)
-    - Min/Max range band is computed as total_amount ± estimate_range_pct
+    - Min/Max range band is computed as total_amount +/- estimate_range_pct
     """
     if settings is None:
         settings = {}
@@ -287,8 +296,28 @@ def calculate_estimate(
     investigations = to_decimal(procedure.get("investigations_charge", 0))
     surgeon_pct = to_decimal(doctor.get("surgeon_fee_pct", 0))
 
-    # Surgeon fee calculation
-    surgeon_fee = quantize_money(proc_base * surgeon_pct / Decimal("100.0"))
+    # Determine surgeon fee mode: "fixed" or "percentage"
+    fee_type = str(surgeon_fee_type or doctor.get("surgeon_fee_type") or "").strip().lower()
+    if fee_type not in ("fixed", "percentage"):
+        if doctor.get("surgeon_fee_amount") and to_decimal(doctor.get("surgeon_fee_amount")) > Decimal("0"):
+            fee_type = "fixed"
+        elif doctor.get("surgeon_fee_pct") and to_decimal(doctor.get("surgeon_fee_pct")) > Decimal("0"):
+            fee_type = "percentage"
+        else:
+            fee_type = "fixed"
+
+    if fee_type == "fixed":
+        if surgeon_fee_amount is not None and str(surgeon_fee_amount).strip() != "":
+            raw_doc_amt = surgeon_fee_amount
+        else:
+            raw_doc_amt = doctor.get("surgeon_fee_amount")
+            if raw_doc_amt is None or str(raw_doc_amt).strip() == "" or to_decimal(raw_doc_amt) == Decimal("0"):
+                raw_doc_amt = doctor.get("consultation_fee", 0)
+        surgeon_fee = quantize_money(to_decimal(raw_doc_amt))
+        surgeon_desc = f"{doctor.get('name', 'Surgeon')} (Fixed Professional Fee)"
+    else:
+        surgeon_fee = quantize_money(proc_base * surgeon_pct / Decimal("100.0"))
+        surgeon_desc = f"{doctor.get('name', 'Surgeon')} ({surgeon_pct}% of base tariff)"
 
     # Room accommodation calculation
     room_charges = quantize_money(Decimal(stay_days) * daily_rate)
@@ -333,7 +362,7 @@ def calculate_estimate(
     line_items.append(
         LineItem(
             category="Surgeon Professional Fee",
-            description=f"{doctor.get('name', 'Surgeon')} ({surgeon_pct}% of base tariff)",
+            description=surgeon_desc,
             quantity=Decimal(1),
             unit_price=surgeon_fee,
             amount=surgeon_fee,
@@ -408,10 +437,32 @@ def calculate_estimate(
     # Grand total
     total_amount = net_base + contingency_amount + tax_amount
 
-    # Range band calculation (± range_pct)
+    # Range band calculation (+/- range_pct)
     range_delta = quantize_money(total_amount * (range_pct / Decimal("100.0")))
     min_estimate = quantize_money(total_amount - range_delta)
     max_estimate = quantize_money(total_amount + range_delta)
+
+    # Comparative estimates for one or more rooms
+    comp_estimates: List[Dict[str, Any]] = []
+    if comparative_rooms:
+        for c_room in comparative_rooms:
+            if c_room.get("id") == room_type.get("id"):
+                continue
+            c_res = calculate_estimate(
+                patient_name=patient_name,
+                stay_days=stay_days,
+                room_type=c_room,
+                doctor=doctor,
+                procedure=procedure,
+                department=department,
+                discount_pct=discount_pct_dec,
+                settings=settings,
+                remarks=remarks,
+                surgeon_fee_type=fee_type,
+                surgeon_fee_amount=surgeon_fee if fee_type == "fixed" else None,
+                comparative_rooms=None,
+            )
+            comp_estimates.append(c_res.to_snapshot_dict())
 
     return EstimateResult(
         patient_name=patient_name.strip(),
@@ -444,6 +495,9 @@ def calculate_estimate(
         disclaimer_text=settings.get("disclaimer_text", ""),
         remarks=remarks.strip(),
         created_at=datetime.now().isoformat(),
+        surgeon_fee_type=fee_type,
+        surgeon_fee_amount=surgeon_fee,
+        comparative_estimates=comp_estimates,
     )
 
 

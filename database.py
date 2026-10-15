@@ -71,6 +71,8 @@ def init_db(conn: sqlite3.Connection) -> None:
                 department_id INTEGER NOT NULL REFERENCES departments(id),
                 consultation_fee INTEGER NOT NULL,
                 surgeon_fee_pct INTEGER NOT NULL,
+                surgeon_fee_type TEXT NOT NULL DEFAULT 'fixed',
+                surgeon_fee_amount INTEGER NOT NULL DEFAULT 0,
                 specialization TEXT,
                 is_active INTEGER NOT NULL DEFAULT 1
             );
@@ -151,6 +153,8 @@ def init_db(conn: sqlite3.Connection) -> None:
         _add_column_if_missing(conn, "estimates", "revision_of", "TEXT DEFAULT NULL")
         _add_column_if_missing(conn, "estimates", "converted", "INTEGER NOT NULL DEFAULT 0")
         _add_column_if_missing(conn, "estimates", "actual_amount", "TEXT DEFAULT NULL")
+        _add_column_if_missing(conn, "doctors", "surgeon_fee_type", "TEXT DEFAULT 'fixed'")
+        _add_column_if_missing(conn, "doctors", "surgeon_fee_amount", "INTEGER DEFAULT 0")
 
 
 def get_next_estimate_number(conn: sqlite3.Connection) -> str:
@@ -343,6 +347,7 @@ def get_doctors(
 ) -> List[Dict[str, Any]]:
     sql = """
         SELECT d.id, d.name, d.department_id, d.consultation_fee, d.surgeon_fee_pct,
+               d.surgeon_fee_type, d.surgeon_fee_amount,
                d.specialization, d.is_active, dep.name as department_name
         FROM doctors d
         JOIN departments dep ON d.department_id = dep.id
@@ -363,6 +368,7 @@ def get_doctor_by_id(conn: sqlite3.Connection, doc_id: int) -> Optional[Dict[str
     row = conn.execute(
         """
         SELECT d.id, d.name, d.department_id, d.consultation_fee, d.surgeon_fee_pct,
+               d.surgeon_fee_type, d.surgeon_fee_amount,
                d.specialization, d.is_active, dep.name as department_name
         FROM doctors d
         JOIN departments dep ON d.department_id = dep.id
@@ -381,6 +387,8 @@ def save_doctor(
     surgeon_fee_pct: int,
     specialization: str,
     doc_id: Optional[int] = None,
+    surgeon_fee_type: str = "fixed",
+    surgeon_fee_amount: int = 0,
 ) -> int:
     clean_name = name.strip()
     dup = conn.execute(
@@ -395,19 +403,19 @@ def save_doctor(
                 """
                 UPDATE doctors
                 SET name = ?, department_id = ?, consultation_fee = ?,
-                    surgeon_fee_pct = ?, specialization = ?
+                    surgeon_fee_pct = ?, surgeon_fee_type = ?, surgeon_fee_amount = ?, specialization = ?
                 WHERE id = ?
                 """,
-                (clean_name, department_id, consultation_fee, surgeon_fee_pct, specialization.strip(), doc_id),
+                (clean_name, department_id, consultation_fee, surgeon_fee_pct, surgeon_fee_type, surgeon_fee_amount, specialization.strip(), doc_id),
             )
             return doc_id
         else:
             cur = conn.execute(
                 """
-                INSERT INTO doctors (name, department_id, consultation_fee, surgeon_fee_pct, specialization, is_active)
-                VALUES (?, ?, ?, ?, ?, 1)
+                INSERT INTO doctors (name, department_id, consultation_fee, surgeon_fee_pct, surgeon_fee_type, surgeon_fee_amount, specialization, is_active)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 1)
                 """,
-                (clean_name, department_id, consultation_fee, surgeon_fee_pct, specialization.strip()),
+                (clean_name, department_id, consultation_fee, surgeon_fee_pct, surgeon_fee_type, surgeon_fee_amount, specialization.strip()),
             )
             return cur.lastrowid
 

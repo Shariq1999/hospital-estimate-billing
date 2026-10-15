@@ -340,18 +340,18 @@ def test_excel_export_generation_and_columns(feature_db):
         acc_val = billing.calculate_accuracy(e["total_amount"], e.get("actual_amount"))
         excel_rows.append({
             "Estimate Number": e["estimate_number"],
-            "Revision Of": e.get("revision_of") or "—",
+            "Revision Of": e.get("revision_of") or "-",
             "Patient Name": e["patient_name"],
-            "UHID": e.get("uhid") or "—",
-            "Mobile Number": e.get("mobile_number") or "—",
-            "Department": e.get("department_name") or "—",
-            "Doctor": e.get("doctor_name") or "—",
-            "Procedure": e.get("procedure_name") or "—",
-            "Room Type": e.get("room_type_name") or "—",
+            "UHID": e.get("uhid") or "-",
+            "Mobile Number": e.get("mobile_number") or "-",
+            "Department": e.get("department_name") or "-",
+            "Doctor": e.get("doctor_name") or "-",
+            "Procedure": e.get("procedure_name") or "-",
+            "Room Type": e.get("room_type_name") or "-",
             "Total Amount (₹)": e.get("total_amount", 0),
             "Converted": "Yes" if e.get("converted") == 1 else "No",
-            "Actual Bill (₹)": e.get("actual_amount") or "—",
-            "Accuracy Variance (%)": f"{acc_val:.2f}%" if acc_val is not None else "—",
+            "Actual Bill (₹)": e.get("actual_amount") or "-",
+            "Accuracy Variance (%)": f"{acc_val:.2f}%" if acc_val is not None else "-",
         })
 
     df = pd.DataFrame(excel_rows)

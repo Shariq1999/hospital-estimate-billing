@@ -166,11 +166,15 @@ def seed(conn: sqlite3.Connection) -> None:
         )
         dept_ids[name] = cur.lastrowid
 
-    for name, dept, cons_fee, pct, spec in DOCTORS:
+    for doc in DOCTORS:
+        name, dept, cons_fee, pct, spec = doc[0], doc[1], doc[2], doc[3], doc[4]
+        fee_type = doc[5] if len(doc) > 5 else "fixed"
+        fee_amt = doc[6] if len(doc) > 6 else (cons_fee * 25)
         cur.execute(
             "INSERT INTO doctors (name, department_id, consultation_fee, "
-            "surgeon_fee_pct, specialization, is_active) VALUES (?, ?, ?, ?, ?, 1)",
-            (name, dept_ids[dept], cons_fee, pct, spec),
+            "surgeon_fee_pct, specialization, surgeon_fee_type, surgeon_fee_amount, is_active) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, 1)",
+            (name, dept_ids[dept], cons_fee, pct, spec, fee_type, fee_amt),
         )
 
     for (name, dept, base, ot, anaes, cons, inv, stay) in PROCEDURES:

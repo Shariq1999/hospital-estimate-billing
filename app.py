@@ -1,7 +1,8 @@
 """
 app.py - Automated Hospital Estimate Billing Generator
 Streamlit application featuring reactive cascading dropdowns, session state preservation,
-per-rerun connection management, immutable estimates, and PDF exports.
+per-rerun connection management, immutable estimates, multi-room comparative billing,
+integrated inline breakdown editing, and PDF exports.
 """
 
 from __future__ import annotations
@@ -35,10 +36,10 @@ def format_history_timestamp(ts: Optional[str]) -> str:
         return str(ts)
 
 
-# Streamlit Page Configuration
+# Streamlit Page Configuration (Clean typography, no emoji)
 st.set_page_config(
     page_title="Hospital Estimate Billing Generator",
-    page_icon="🏥",
+    page_icon=None,
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -77,21 +78,23 @@ try:
         st.session_state["input_stay_days"] = 1
     if "admin_authenticated" not in st.session_state:
         st.session_state["admin_authenticated"] = False
+    if "inline_editing" not in st.session_state:
+        st.session_state["inline_editing"] = False
 
     def mark_inputs_changed():
         """Callback triggered whenever any generator input field is modified."""
         st.session_state["inputs_dirty"] = True
         st.session_state["saved_estimate_number"] = None
 
-    # Sidebar Navigation
-    st.sidebar.title("🏥 Hospital Billing")
+    # Sidebar Navigation (Clean labels, no emojis)
+    st.sidebar.title("Hospital Billing")
     st.sidebar.caption("Automated Tariff & Estimate Generator")
 
     nav_options = [
-        "🏥 Generate Estimate",
-        "📋 Estimate History",
-        "📊 Dashboard",
-        "⚙️ Admin Portal",
+        "Generate Estimate",
+        "Estimate History",
+        "Dashboard",
+        "Admin Portal",
     ]
     if "nav_option" in st.session_state and st.session_state["nav_option"] in nav_options:
         default_idx = nav_options.index(st.session_state.pop("nav_option"))
@@ -105,13 +108,14 @@ try:
     )
 
     if st.session_state.get("admin_authenticated"):
-        st.sidebar.markdown(f"👤 **Staff User:** `{st.session_state.get('admin_username', 'admin')}`")
-        if st.sidebar.button("🚪 Log Out", key="sidebar_logout_btn", width="stretch"):
+        st.sidebar.markdown(f"**Staff User:** `{st.session_state.get('admin_username', 'admin')}`")
+        if st.sidebar.button("Log Out", key="sidebar_logout_btn", width="stretch"):
             st.session_state["admin_authenticated"] = False
             st.session_state["admin_username"] = None
             st.session_state.pop("db_backup_bytes", None)
             st.session_state.pop("db_backup_prepared_at", None)
             st.session_state.pop("revision_source", None)
+            st.session_state["inline_editing"] = False
             st.rerun()
 
     st.sidebar.divider()
@@ -124,22 +128,22 @@ try:
     # ==========================================================================
     # VIEW 1: GENERATE ESTIMATE (Main UI)
     # ==========================================================================
-    if navigation_option == "🏥 Generate Estimate":
-        st.header("🏥 Patient Cost Estimation Generator")
+    if navigation_option == "Generate Estimate":
+        st.header("Patient Cost Estimation Generator")
         st.caption("Generate an itemized treatment estimate with professional doctor fees, OT, consumables, and hospital tariffs.")
 
         # Authentication Gate for Estimate Generation
         if not st.session_state.get("admin_authenticated"):
             admin_configured = database.is_admin_configured(conn)
             if not admin_configured:
-                st.info("👋 **Welcome to First-Run Setup!** Please configure the administrator account in the **⚙️ Admin Portal** menu to begin.")
+                st.info("**Welcome to First-Run Setup:** Please configure the administrator account in the **Admin Portal** menu to begin.")
             else:
-                st.subheader("🔐 Staff Authentication")
+                st.subheader("Staff Authentication")
                 st.caption("Please log in with your credentials to generate or revise patient cost estimates.")
                 with st.form("generator_login_form"):
                     gate_user = st.text_input("Username", key="gate_user")
                     gate_pwd = st.text_input("Password", type="password", key="gate_pwd")
-                    gate_submitted = st.form_submit_button("🔓 Log In & Continue", type="primary", width="stretch")
+                    gate_submitted = st.form_submit_button("Log In & Continue", type="primary", width="stretch")
                     if gate_submitted:
                         if database.verify_admin_credentials(conn, gate_user.strip(), gate_pwd):
                             st.session_state["admin_authenticated"] = True
@@ -162,13 +166,14 @@ try:
                     orig_num = rev_source["estimate_number"]
                     next_rev = database.get_next_revision_number(conn, orig_num)
                     st.warning(
-                        f"✏️ **Revision Mode Active:** Modifying Estimate **{orig_num}** → will be saved as revision **{next_rev}** (original remains preserved in history)."
+                        f"**Revision Mode Active:** Modifying Estimate **{orig_num}** -> will be saved as revision **{next_rev}** (original remains preserved in history)."
                     )
                 with col_rev_btn:
-                    if st.button("❌ Cancel Revision", key="cancel_rev_btn", width="stretch"):
+                    if st.button("Cancel Revision", key="cancel_rev_btn", width="stretch"):
                         st.session_state["revision_source"] = None
                         st.session_state["active_estimate"] = None
                         st.session_state["saved_estimate_number"] = None
+                        st.session_state["inline_editing"] = False
                         st.rerun()
 
             # Master Data Lookups (Active records only)
@@ -176,9 +181,9 @@ try:
             all_departments = database.get_departments(conn, active_only=True)
 
             if not all_rooms:
-                st.error("❌ No active room categories configured. Please configure room categories in the Admin Portal.")
+                st.error("No active room categories configured. Please configure room categories in the Admin Portal.")
             if not all_departments:
-                st.error("❌ No active departments configured. Please configure departments in the Admin Portal.")
+                st.error("No active departments configured. Please configure departments in the Admin Portal.")
 
             can_generate = bool(all_rooms and all_departments)
 
@@ -210,13 +215,31 @@ try:
                     room_options = {r["id"]: r for r in all_rooms}
                     room_keys = list(room_options.keys())
                     selected_room_id = st.selectbox(
-                        "Room Category *",
+                        "Primary Room Category *",
                         options=room_keys,
-                        format_func=lambda rid: f"{room_options[rid]['name']} — {billing.format_inr(room_options[rid]['daily_rate'], whole_rupees=True)}/day",
+                        format_func=lambda rid: f"{room_options[rid]['name']} - {billing.format_inr(room_options[rid]['daily_rate'], whole_rupees=True)}/day",
                         key="input_room_id",
                         on_change=mark_inputs_changed,
                     )
                     selected_room = room_options.get(selected_room_id)
+
+                # Room Comparison Controls (Provision for one or more rooms)
+                compare_rooms = st.checkbox(
+                    "Compare with other room categories",
+                    key="chk_compare_rooms",
+                    on_change=mark_inputs_changed,
+                )
+                selected_comp_rooms = []
+                if compare_rooms:
+                    comp_candidates = [r for r in all_rooms if r["id"] != selected_room_id]
+                    selected_comp_ids = st.multiselect(
+                        "Select Room Categories for Comparative Setting (one or more):",
+                        options=[r["id"] for r in comp_candidates],
+                        format_func=lambda rid: f"{room_options[rid]['name']} - {billing.format_inr(room_options[rid]['daily_rate'], whole_rupees=True)}/day",
+                        key="input_comp_room_ids",
+                        on_change=mark_inputs_changed,
+                    )
+                    selected_comp_rooms = [room_options[rid] for rid in selected_comp_ids if rid in room_options]
 
                 # Cascading Dropdowns: Department -> Doctor & Procedure
                 st.subheader("Clinical Consultation & Procedure")
@@ -239,14 +262,14 @@ try:
 
                 with col_c2:
                     if not dept_doctors:
-                        st.warning("⚠️ No active doctors configured in this department.")
+                        st.warning("No active doctors configured in this department.")
                         selected_doctor = None
                     else:
                         doc_options = {doc["id"]: doc for doc in dept_doctors}
                         selected_doc_id = st.selectbox(
                             "Attending Doctor / Specialist *",
                             options=list(doc_options.keys()),
-                            format_func=lambda did: f"{doc_options[did]['name']} ({doc_options[did]['specialization']} — Fee: {billing.format_inr(doc_options[did]['consultation_fee'], whole_rupees=True)}, {doc_options[did]['surgeon_fee_pct']}% fee)",
+                            format_func=lambda did: f"{doc_options[did]['name']} ({doc_options[did]['specialization']} - Fixed: {billing.format_inr(doc_options[did].get('surgeon_fee_amount') or (doc_options[did]['consultation_fee'] * 25), whole_rupees=True)})",
                             key="input_doc_id",
                             on_change=mark_inputs_changed,
                         )
@@ -254,7 +277,7 @@ try:
 
                 with col_c3:
                     if not dept_procedures:
-                        st.warning("⚠️ No active procedures configured in this department.")
+                        st.warning("No active procedures configured in this department.")
                         selected_procedure = None
                     else:
                         proc_options = {p["id"]: p for p in dept_procedures}
@@ -266,6 +289,44 @@ try:
                             on_change=mark_inputs_changed,
                         )
                         selected_procedure = proc_options.get(selected_proc_id)
+
+                # Surgeon Fee Mode Switch (Fixed Amount vs Percentage)
+                col_sf1, col_sf2 = st.columns([1.5, 1.5])
+                with col_sf1:
+                    surgeon_fee_mode = st.radio(
+                        "Surgeon Fee Calculation Mode",
+                        options=["Fixed Amount", "Percentage of Base Tariff"],
+                        horizontal=True,
+                        key="input_surgeon_fee_mode",
+                        on_change=mark_inputs_changed,
+                    )
+                with col_sf2:
+                    if surgeon_fee_mode == "Fixed Amount":
+                        default_surg_amt = 0
+                        if selected_doctor:
+                            default_surg_amt = int(selected_doctor.get("surgeon_fee_amount") or 0)
+                            if default_surg_amt == 0:
+                                default_surg_amt = int(selected_doctor.get("consultation_fee", 0) * 25)
+                        surgeon_fee_val = st.number_input(
+                            "Surgeon Professional Fee (INR) *",
+                            min_value=0,
+                            value=default_surg_amt,
+                            step=1000,
+                            key="input_surgeon_fee_val",
+                            on_change=mark_inputs_changed,
+                        )
+                    else:
+                        default_pct = int(selected_doctor.get("surgeon_fee_pct", 40)) if selected_doctor else 40
+                        surgeon_pct_val = st.number_input(
+                            "Surgeon Fee Percentage (%) *",
+                            min_value=0,
+                            max_value=100,
+                            value=default_pct,
+                            step=5,
+                            key="input_surgeon_pct_val",
+                            on_change=mark_inputs_changed,
+                        )
+                        surgeon_fee_val = None
 
                 # Update Length of Stay default if procedure changed
                 if selected_procedure:
@@ -306,9 +367,9 @@ try:
                         on_change=mark_inputs_changed,
                     )
 
-                # Advanced Price Overrides Expander (Maximum Flexibility for Editing)
-                with st.expander("⚙️ Price & Tariff Overrides (Edit Specific Prices)", expanded=bool(st.session_state.get("revision_source"))):
-                    st.caption("Override any catalog tariffs for this estimate. Leave blank to use standard master rates.")
+                # Advanced Price Overrides Expander (Edit Specific Prices)
+                with st.expander("Price & Tariff Overrides (Edit Specific Prices)", expanded=bool(st.session_state.get("revision_source"))):
+                    st.caption("Override catalog tariffs for this estimate. Leave blank to use standard master rates.")
                     ov1, ov2, ov3, ov4 = st.columns(4)
                     with ov1:
                         ov_room_rate = st.text_input(
@@ -325,10 +386,12 @@ try:
                             on_change=mark_inputs_changed,
                         )
                     with ov3:
-                        ov_surgeon_pct = st.text_input(
-                            "Surgeon Fee (%)",
-                            placeholder=str(selected_doctor["surgeon_fee_pct"]) if selected_doctor else "",
-                            key="ov_surgeon_pct",
+                        ov_surg_fee_label = "Surgeon Fee Amount (₹)" if surgeon_fee_mode == "Fixed Amount" else "Surgeon Fee (%)"
+                        ov_surg_holder = str(surgeon_fee_val) if surgeon_fee_mode == "Fixed Amount" else str(surgeon_pct_val)
+                        ov_surgeon = st.text_input(
+                            ov_surg_fee_label,
+                            placeholder=ov_surg_holder,
+                            key="ov_surgeon",
                             on_change=mark_inputs_changed,
                         )
                     with ov4:
@@ -365,18 +428,18 @@ try:
                 st.markdown("<br/>", unsafe_allow_html=True)
                 col_act1, col_act2 = st.columns([1.5, 4])
                 with col_act1:
-                    generate_clicked = st.button("⚡ Generate Estimate", type="primary", width="stretch")
+                    generate_clicked = st.button("Generate Estimate", type="primary", width="stretch")
 
                 # Handle Generation Action
                 if generate_clicked:
                     valid_name, err_name = billing.validate_patient_name(patient_name)
                     valid_mobile, err_mobile = billing.validate_mobile_number(mobile_number)
                     if not valid_name:
-                        st.error(f"❌ {err_name}")
+                        st.error(err_name)
                     elif not valid_mobile:
-                        st.error(f"❌ {err_mobile}")
+                        st.error(err_mobile)
                     elif not selected_doctor or not selected_procedure:
-                        st.error("❌ Please select a valid doctor and procedure for this department.")
+                        st.error("Please select a valid doctor and procedure for this department.")
                     else:
                         calc_room = dict(selected_room)
                         if ov_room_rate.strip():
@@ -425,13 +488,24 @@ try:
                                 calc_proc = None
 
                         calc_doc = dict(selected_doctor)
-                        if calc_room and calc_proc and ov_surgeon_pct.strip():
-                            v, dec, e = billing.validate_whole_percentage_field(ov_surgeon_pct, "Surgeon Fee (%)")
-                            if v:
-                                calc_doc["surgeon_fee_pct"] = dec
-                            else:
-                                st.error(e)
-                                calc_doc = None
+                        calc_surg_amt = surgeon_fee_val
+                        if surgeon_fee_mode == "Percentage of Base Tariff":
+                            calc_surg_pct = surgeon_pct_val
+                            if ov_surgeon.strip():
+                                v, dec, e = billing.validate_whole_percentage_field(ov_surgeon, "Surgeon Fee (%)")
+                                if v:
+                                    calc_doc["surgeon_fee_pct"] = dec
+                                else:
+                                    st.error(e)
+                                    calc_doc = None
+                        else:
+                            if ov_surgeon.strip():
+                                v, dec, e = billing.validate_whole_rupee_field(ov_surgeon, "Surgeon Fee Amount")
+                                if v:
+                                    calc_surg_amt = dec
+                                else:
+                                    st.error(e)
+                                    calc_doc = None
 
                         if calc_room and calc_proc and calc_doc:
                             est_result = billing.calculate_estimate(
@@ -444,12 +518,16 @@ try:
                                 discount_pct=discount_pct,
                                 settings=settings,
                                 remarks=remarks,
+                                surgeon_fee_type="fixed" if surgeon_fee_mode == "Fixed Amount" else "percentage",
+                                surgeon_fee_amount=calc_surg_amt if surgeon_fee_mode == "Fixed Amount" else None,
+                                comparative_rooms=selected_comp_rooms if compare_rooms else None,
                             )
                             est_result.mobile_number = mobile_number.strip()
                             est_result.uhid = uhid.strip()
                             st.session_state["active_estimate"] = est_result
                             st.session_state["saved_estimate_number"] = None
                             st.session_state["inputs_dirty"] = False
+                            st.session_state["inline_editing"] = False
 
                 # Render Estimate Breakdown
                 active_est = st.session_state.get("active_estimate")
@@ -457,14 +535,111 @@ try:
                     st.divider()
 
                     if st.session_state.get("inputs_dirty"):
-                        st.warning("⚠️ **Notice:** Input fields have been modified since this estimate was generated. Click **'Generate Estimate'** to recalculate before saving or downloading.")
+                        st.warning("**Notice:** Input fields have been modified since this estimate was generated. Click **'Generate Estimate'** to recalculate before saving or downloading.")
 
                     saved_num = st.session_state.get("saved_estimate_number")
                     if saved_num:
-                        st.success(f"✅ **Estimate Saved to Database:** Record Number **{saved_num}**")
+                        st.success(f"**Estimate Saved to Database:** Record Number **{saved_num}**")
 
-                    st.subheader("📋 Itemized Estimate Breakdown")
+                    # Header with integrated Edit button (Task 4)
+                    col_brk_title, col_brk_btn = st.columns([3.8, 1.2])
+                    with col_brk_title:
+                        st.subheader("Itemized Estimate Breakdown")
+                    with col_brk_btn:
+                        edit_label = "Close Editor" if st.session_state.get("inline_editing") else "Edit Estimate"
+                        if st.button(edit_label, key="btn_toggle_inline_edit", width="stretch"):
+                            st.session_state["inline_editing"] = not st.session_state.get("inline_editing", False)
+                            st.rerun()
 
+                    # Integrated Inline Editor
+                    if st.session_state.get("inline_editing"):
+                        with st.container(border=True):
+                            st.markdown("##### Inline Estimate Editor")
+                            st.caption("Directly adjust tariffs, line items, doctor fees, stay days, or clinical remarks. Click 'Apply Changes' to update the estimate instantly.")
+                            ed_c1, ed_c2, ed_c3 = st.columns([1.2, 1.2, 2.5])
+                            with ed_c1:
+                                edit_stay = st.number_input("Length of Stay (Days)", min_value=0, max_value=365, value=int(active_est.stay_days), key="edit_stay_days")
+                            with ed_c2:
+                                edit_disc = st.number_input("Discount (%)", min_value=0.0, max_value=100.0, value=float(active_est.discount_pct), step=1.0, key="edit_disc_pct")
+                            with ed_c3:
+                                edit_remarks = st.text_input("Clinical Remarks", value=active_est.remarks, key="edit_remarks_val")
+
+                            ed_t1, ed_t2, ed_t3, ed_t4 = st.columns(4)
+                            with ed_t1:
+                                edit_room_rate = st.number_input("Room Daily Rate (INR)", min_value=0, value=int(active_est.room_daily_rate), step=500, key="edit_room_rate_val")
+                            with ed_t2:
+                                proc_item = next((it for it in active_est.line_items if it.category == "Hospital Procedure Tariff"), None)
+                                proc_val = int(proc_item.amount) if proc_item else 0
+                                edit_proc_rate = st.number_input("Procedure Base (INR)", min_value=0, value=proc_val, step=1000, key="edit_proc_rate_val")
+                            with ed_t3:
+                                surg_item = next((it for it in active_est.line_items if it.category == "Surgeon Professional Fee"), None)
+                                surg_val = int(surg_item.amount) if surg_item else 0
+                                edit_surg_fee = st.number_input("Surgeon Fee (INR)", min_value=0, value=surg_val, step=1000, key="edit_surg_fee_val")
+                            with ed_t4:
+                                ot_item = next((it for it in active_est.line_items if it.category == "Operation Theatre Charges"), None)
+                                ot_val = int(ot_item.amount) if ot_item else 0
+                                edit_ot_rate = st.number_input("OT Charges (INR)", min_value=0, value=ot_val, step=1000, key="edit_ot_rate_val")
+
+                            ed_t5, ed_t6, ed_t7 = st.columns(3)
+                            with ed_t5:
+                                anaes_item = next((it for it in active_est.line_items if it.category == "Anaesthesia Charges"), None)
+                                anaes_val = int(anaes_item.amount) if anaes_item else 0
+                                edit_anaes_rate = st.number_input("Anaesthesia (INR)", min_value=0, value=anaes_val, step=1000, key="edit_anaes_rate_val")
+                            with ed_t6:
+                                cons_item = next((it for it in active_est.line_items if it.category == "Surgical Consumables & Implants"), None)
+                                cons_val = int(cons_item.amount) if cons_item else 0
+                                edit_cons_rate = st.number_input("Consumables (INR)", min_value=0, value=cons_val, step=1000, key="edit_cons_rate_val")
+                            with ed_t7:
+                                inv_item = next((it for it in active_est.line_items if it.category == "Investigations & Diagnostics"), None)
+                                inv_val = int(inv_item.amount) if inv_item else 0
+                                edit_inv_rate = st.number_input("Investigations (INR)", min_value=0, value=inv_val, step=1000, key="edit_inv_rate_val")
+
+                            btn_apply, btn_close = st.columns([1.5, 1.5])
+                            with btn_apply:
+                                if st.button("Apply Changes", type="primary", key="btn_apply_inline_edits", width="stretch"):
+                                    temp_room = dict(selected_room) if selected_room else {"name": active_est.room_type_name, "daily_rate": edit_room_rate}
+                                    temp_room["daily_rate"] = edit_room_rate
+                                    temp_proc = dict(selected_procedure) if selected_procedure else {
+                                        "name": active_est.procedure_name,
+                                        "base_cost": edit_proc_rate,
+                                        "ot_charge": edit_ot_rate,
+                                        "anaesthesia_charge": edit_anaes_rate,
+                                        "consumables_cost": edit_cons_rate,
+                                        "investigations_charge": edit_inv_rate,
+                                    }
+                                    temp_proc["base_cost"] = edit_proc_rate
+                                    temp_proc["ot_charge"] = edit_ot_rate
+                                    temp_proc["anaesthesia_charge"] = edit_anaes_rate
+                                    temp_proc["consumables_cost"] = edit_cons_rate
+                                    temp_proc["investigations_charge"] = edit_inv_rate
+                                    temp_doc = dict(selected_doctor) if selected_doctor else {"name": active_est.doctor_name, "surgeon_fee_pct": 0, "consultation_fee": edit_surg_fee}
+
+                                    recalculated = billing.calculate_estimate(
+                                        patient_name=active_est.patient_name,
+                                        stay_days=edit_stay,
+                                        room_type=temp_room,
+                                        doctor=temp_doc,
+                                        procedure=temp_proc,
+                                        department=selected_dept if selected_dept else {"name": active_est.department_name},
+                                        discount_pct=edit_disc,
+                                        settings=settings,
+                                        remarks=edit_remarks,
+                                        surgeon_fee_type="fixed",
+                                        surgeon_fee_amount=edit_surg_fee,
+                                        comparative_rooms=selected_comp_rooms if compare_rooms else None,
+                                    )
+                                    recalculated.mobile_number = active_est.mobile_number
+                                    recalculated.uhid = active_est.uhid
+                                    st.session_state["active_estimate"] = recalculated
+                                    st.session_state["saved_estimate_number"] = None
+                                    st.session_state["inline_editing"] = False
+                                    st.rerun()
+                            with btn_close:
+                                if st.button("Cancel", key="btn_cancel_inline_edits", width="stretch"):
+                                    st.session_state["inline_editing"] = False
+                                    st.rerun()
+
+                    # Metric Summary Cards
                     m1, m2, m3, m4, m5 = st.columns(5)
                     m1.metric("Gross Subtotal", billing.format_inr(active_est.subtotal))
                     m2.metric(
@@ -485,100 +660,76 @@ try:
                     )
 
                     st.info(
-                        f"**Expected Cost Range (±{active_est.estimate_range_pct}%):** "
-                        f"**{billing.format_inr(active_est.min_estimate)}** — **{billing.format_inr(active_est.max_estimate)}**\n\n"
+                        f"**Expected Cost Range (+/-{active_est.estimate_range_pct}%):** "
+                        f"**{billing.format_inr(active_est.min_estimate)}** to **{billing.format_inr(active_est.max_estimate)}**\n\n"
                         "*(Accounts for potential variations in surgical supplies, length of stay, or medical management)*"
                     )
 
-                    table_records = []
-                    for item in active_est.line_items:
-                        table_records.append(
-                            {
+                    # Table Rendering: Comparative vs Single-Room
+                    if active_est.comparative_estimates:
+                        st.write("##### Primary and Comparative Room Categories Analysis")
+                        rows_comp = []
+                        for idx, item in enumerate(active_est.line_items):
+                            r = {
                                 "Category": item.category,
                                 "Description": item.description,
-                                "Quantity": f"{item.quantity:.0f}" if item.quantity == int(item.quantity) else str(item.quantity),
-                                "Unit Rate": billing.format_inr(item.unit_price),
-                                "Gross Amount": billing.format_inr(item.amount),
-                                "Discount": f"-{billing.format_inr(item.discount_amount)}" if item.discount_amount > Decimal("0") else "—",
-                                "Net Amount": billing.format_inr(item.net_amount),
-                                "Taxable": "Yes" if item.is_taxable else "No",
+                                f"{active_est.room_type_name} (Primary)": billing.format_inr(item.amount),
                             }
-                        )
-                    st.dataframe(pd.DataFrame(table_records), width="stretch", hide_index=True)
+                            for c in active_est.comparative_estimates:
+                                c_name = c.get("clinical", {}).get("room_type", "Comparative")
+                                c_items = c.get("line_items", [])
+                                if idx < len(c_items):
+                                    c_amt = billing.format_inr(c_items[idx].get("amount", 0))
+                                else:
+                                    c_amt = billing.format_inr(item.amount)
+                                r[c_name] = c_amt
+                            rows_comp.append(r)
 
-                    # Comparative Estimate (Feature 3: Next Room Tier)
-                    all_rooms_sorted = sorted(all_rooms, key=lambda r: r["daily_rate"])
-                    cur_room_idx = next((i for i, r in enumerate(all_rooms_sorted) if r["id"] == selected_room["id"]), None)
-                    superior_room = (
-                        all_rooms_sorted[cur_room_idx + 1]
-                        if cur_room_idx is not None and cur_room_idx + 1 < len(all_rooms_sorted)
-                        else None
-                    )
+                        # Summary rows
+                        r_sub = {"Category": "SUBTOTAL", "Description": "Gross Itemized Charges", f"{active_est.room_type_name} (Primary)": billing.format_inr(active_est.subtotal)}
+                        for c in active_est.comparative_estimates:
+                            r_sub[c.get("clinical", {}).get("room_type", "Comparative")] = billing.format_inr(c.get("financials", {}).get("subtotal", 0))
+                        rows_comp.append(r_sub)
 
-                    with st.expander("📊 Comparative Estimate — Superior Room Category (Upgrade Option)", expanded=False):
-                        if superior_room:
-                            superior_est = billing.calculate_estimate(
-                                patient_name=active_est.patient_name,
-                                stay_days=active_est.stay_days,
-                                room_type=superior_room,
-                                doctor=selected_doctor,
-                                procedure=selected_procedure,
-                                department=selected_dept,
-                                discount_pct=active_est.discount_pct,
-                                settings=settings,
-                                remarks=active_est.remarks,
-                            )
-                            diff_total = superior_est.total_amount - active_est.total_amount
-                            c_u1, c_u2, c_u3 = st.columns(3)
-                            c_u1.metric(
-                                f"Current: {active_est.room_type_name}",
-                                billing.format_inr(active_est.total_amount),
-                                f"{billing.format_inr(active_est.room_daily_rate, whole_rupees=True)}/day",
-                            )
-                            c_u2.metric(
-                                f"Upgrade: {superior_est.room_type_name}",
-                                billing.format_inr(superior_est.total_amount),
-                                f"{billing.format_inr(superior_est.room_daily_rate, whole_rupees=True)}/day",
-                            )
-                            c_u3.metric(
-                                "Total Upgrade Difference",
-                                f"+{billing.format_inr(diff_total)}",
-                                f"+{billing.format_inr(superior_est.room_daily_rate - active_est.room_daily_rate, whole_rupees=True)}/day room diff",
-                            )
+                        if active_est.discount_pct > Decimal("0"):
+                            r_disc = {"Category": "DISCOUNT", "Description": f"{active_est.discount_pct}% special discount", f"{active_est.room_type_name} (Primary)": f"-{billing.format_inr(active_est.discount_amount)}"}
+                            for c in active_est.comparative_estimates:
+                                r_disc[c.get("clinical", {}).get("room_type", "Comparative")] = f"-{billing.format_inr(c.get('financials', {}).get('discount_amount', 0))}"
+                            rows_comp.append(r_disc)
 
-                            st.write("**Comparative Category-by-Category Analysis:**")
-                            comp_rows = []
-                            for cur_i, up_i in zip(active_est.line_items, superior_est.line_items):
-                                d_amt = up_i.net_amount - cur_i.net_amount
-                                d_str = f"+{billing.format_inr(d_amt)}" if d_amt > Decimal("0") else ("—" if d_amt == Decimal("0") else billing.format_inr(d_amt))
-                                comp_rows.append({
-                                    "Billing Component": cur_i.category,
-                                    f"Current Tier ({active_est.room_type_name})": billing.format_inr(cur_i.net_amount),
-                                    f"Upgrade Tier ({superior_est.room_type_name})": billing.format_inr(up_i.net_amount),
-                                    "Difference": d_str,
-                                })
-                            comp_rows.append({
-                                "Billing Component": "CONTINGENCY BUFFER",
-                                f"Current Tier ({active_est.room_type_name})": billing.format_inr(active_est.contingency_amount),
-                                f"Upgrade Tier ({superior_est.room_type_name})": billing.format_inr(superior_est.contingency_amount),
-                                "Difference": f"+{billing.format_inr(superior_est.contingency_amount - active_est.contingency_amount)}",
-                            })
-                            comp_rows.append({
-                                "Billing Component": "TAX / GST",
-                                f"Current Tier ({active_est.room_type_name})": billing.format_inr(active_est.tax_amount),
-                                f"Upgrade Tier ({superior_est.room_type_name})": billing.format_inr(superior_est.tax_amount),
-                                "Difference": f"+{billing.format_inr(superior_est.tax_amount - active_est.tax_amount)}",
-                            })
-                            comp_rows.append({
-                                "Billing Component": "TOTAL ESTIMATED AMOUNT",
-                                f"Current Tier ({active_est.room_type_name})": billing.format_inr(active_est.total_amount),
-                                f"Upgrade Tier ({superior_est.room_type_name})": billing.format_inr(superior_est.total_amount),
-                                "Difference": f"+{billing.format_inr(diff_total)}",
-                            })
-                            st.dataframe(pd.DataFrame(comp_rows), width="stretch", hide_index=True)
-                            st.caption("ℹ️ *Comparative estimate is for patient financial counseling only. Only the primary estimate can be saved to records.*")
-                        else:
-                            st.info("ℹ️ The selected room category is already the highest tier available. No higher comparative tier applicable.")
+                        r_cont = {"Category": "CONTINGENCY BUFFER", "Description": f"{active_est.contingency_pct}% non-taxed buffer", f"{active_est.room_type_name} (Primary)": billing.format_inr(active_est.contingency_amount)}
+                        for c in active_est.comparative_estimates:
+                            r_cont[c.get("clinical", {}).get("room_type", "Comparative")] = billing.format_inr(c.get("financials", {}).get("contingency_amount", 0))
+                        rows_comp.append(r_cont)
+
+                        if active_est.tax_pct > Decimal("0"):
+                            r_tax = {"Category": "GST / TAX", "Description": f"{active_est.tax_pct}% tax", f"{active_est.room_type_name} (Primary)": billing.format_inr(active_est.tax_amount)}
+                            for c in active_est.comparative_estimates:
+                                r_tax[c.get("clinical", {}).get("room_type", "Comparative")] = billing.format_inr(c.get("financials", {}).get("tax_amount", 0))
+                            rows_comp.append(r_tax)
+
+                        r_tot = {"Category": "TOTAL ESTIMATE", "Description": "Total Estimated Cost", f"{active_est.room_type_name} (Primary)": billing.format_inr(active_est.total_amount)}
+                        for c in active_est.comparative_estimates:
+                            r_tot[c.get("clinical", {}).get("room_type", "Comparative")] = billing.format_inr(c.get("financials", {}).get("total_amount", 0))
+                        rows_comp.append(r_tot)
+
+                        st.dataframe(pd.DataFrame(rows_comp), width="stretch", hide_index=True)
+                    else:
+                        table_records = []
+                        for item in active_est.line_items:
+                            table_records.append(
+                                {
+                                    "Category": item.category,
+                                    "Description": item.description,
+                                    "Quantity": f"{item.quantity:.0f}" if item.quantity == int(item.quantity) else str(item.quantity),
+                                    "Unit Rate": billing.format_inr(item.unit_price),
+                                    "Gross Amount": billing.format_inr(item.amount),
+                                    "Discount": f"-{billing.format_inr(item.discount_amount)}" if item.discount_amount > Decimal("0") else "-",
+                                    "Net Amount": billing.format_inr(item.net_amount),
+                                    "Taxable": "Yes" if item.is_taxable else "No",
+                                }
+                            )
+                        st.dataframe(pd.DataFrame(table_records), width="stretch", hide_index=True)
 
                     st.markdown("<br/>", unsafe_allow_html=True)
 
@@ -587,7 +738,7 @@ try:
 
                     with btn_col1:
                         save_disabled = bool(st.session_state.get("inputs_dirty") or st.session_state.get("saved_estimate_number"))
-                        save_btn_label = "💾 Save Estimate" if not st.session_state.get("saved_estimate_number") else "✅ Saved"
+                        save_btn_label = "Save Estimate" if not st.session_state.get("saved_estimate_number") else "Saved"
                         if st.button(save_btn_label, disabled=save_disabled, type="primary", width="stretch"):
                             rev_source = st.session_state.get("revision_source")
                             if rev_source:
@@ -633,14 +784,13 @@ try:
                         is_draft = st.session_state.get("saved_estimate_number") is None
                         pdf_bytes = pdf_generator.generate_estimate_pdf(active_est, is_draft=is_draft)
 
-                        # Feature 6: Standardized naming template {PatientName}_{UHID}_{EstimateNumber}.pdf
                         safe_name = re.sub(r'[^\w\-]', '_', active_est.patient_name.strip())[:30] or "Patient"
                         safe_uhid = re.sub(r'[^\w\-]', '_', (active_est.uhid or "").strip() or "NoUHID")[:15]
                         est_num_label = st.session_state.get('saved_estimate_number') or 'DRAFT'
                         file_label = f"{safe_name}_{safe_uhid}_{est_num_label}.pdf"
 
                         st.download_button(
-                            label="📄 Download PDF Letterhead",
+                            label="Download PDF Letterhead",
                             data=pdf_bytes,
                             file_name=file_label,
                             mime="application/pdf",
@@ -650,22 +800,22 @@ try:
 
                     with btn_col3:
                         if is_draft:
-                            st.caption("ℹ️ *PDF downloaded now will be marked **DRAFT - NOT SAVED**. Save the estimate to assign a permanent estimate number.*")
+                            st.caption("*PDF downloaded now will be marked **DRAFT - NOT SAVED**. Save the estimate to assign a permanent estimate number.*")
                         else:
-                            st.caption(f"ℹ️ *Estimate saved with permanent number **{st.session_state['saved_estimate_number']}**.*")
+                            st.caption(f"*Estimate saved with permanent number **{st.session_state['saved_estimate_number']}**.*")
 
     # ==========================================================================
     # VIEW 2: ESTIMATE HISTORY & REPRINT
     # ==========================================================================
-    elif navigation_option == "📋 Estimate History":
-        st.header("📋 Estimate Records & Historical Reprint")
+    elif navigation_option == "Estimate History":
+        st.header("Estimate Records & Historical Reprint")
         st.caption("Search past estimates, update conversion outcomes, revise records, and reprint frozen PDF snapshots.")
 
         # Search & Filter Controls
         col_s1, col_s2 = st.columns([3, 2])
         with col_s1:
             search_query = st.text_input(
-                "🔍 Search by Patient Name, Estimate #, UHID, or Mobile",
+                "Search by Patient Name, Estimate #, UHID, or Mobile",
                 placeholder="e.g. Sharma, UH-0012, or 98765...",
                 key="history_search_input",
             )
@@ -697,24 +847,24 @@ try:
                 summary_rows.append(
                     {
                         "Estimate Number": e["estimate_number"],
-                        "Revision Of": e.get("revision_of") or "—",
+                        "Revision Of": e.get("revision_of") or "-",
                         "Date": format_history_timestamp(e.get("created_at")),
                         "Patient Name": e["patient_name"],
-                        "UHID": e.get("uhid") or "—",
-                        "Mobile": e.get("mobile_number") or "—",
-                        "Department": e.get("department_name") or "—",
-                        "Procedure": e.get("procedure_name") or "—",
-                        "Doctor": e.get("doctor_name") or "—",
-                        "Room Category": e.get("room_type_name") or "—",
+                        "UHID": e.get("uhid") or "-",
+                        "Mobile": e.get("mobile_number") or "-",
+                        "Department": e.get("department_name") or "-",
+                        "Procedure": e.get("procedure_name") or "-",
+                        "Doctor": e.get("doctor_name") or "-",
+                        "Room Category": e.get("room_type_name") or "-",
                         "Total Amount": billing.format_inr(e["total_amount"]),
                         "Converted": "Yes" if e.get("converted") == 1 else "No",
-                        "Actual Bill": billing.format_inr(e["actual_amount"]) if e.get("actual_amount") else "—",
+                        "Actual Bill": billing.format_inr(e["actual_amount"]) if e.get("actual_amount") else "-",
                     }
                 )
             st.dataframe(pd.DataFrame(summary_rows), width="stretch", hide_index=True)
 
             st.divider()
-            st.subheader("🔍 Inspect, Revise & Update Historical Estimate")
+            st.subheader("Inspect, Revise & Update Historical Estimate")
 
             est_map = {e["estimate_number"]: e for e in estimates}
             selected_est_num = st.selectbox(
@@ -742,16 +892,15 @@ try:
 
                 est_created_dt = format_history_timestamp(meta.get("created_at") or sel_record.get("created_at"))
                 st.info(
-                    f"🔒 **Immutable Historical Record:** Estimate **{selected_est_num}** generated on **{est_created_dt}**.\n\n"
-                    "*Rendered from a frozen snapshot. Future changes to master room, procedure, or doctor prices do NOT alter this estimate.*",
-                    icon="ℹ️",
+                    f"**Immutable Historical Record:** Estimate **{selected_est_num}** generated on **{est_created_dt}**.\n\n"
+                    "*Rendered from a frozen snapshot. Future changes to master room, procedure, or doctor prices do NOT alter this estimate.*"
                 )
 
                 # Metadata display
                 c1, c2, c3, c4 = st.columns(4)
                 c1.markdown(f"**Patient:** {patient_info.get('name', sel_record['patient_name'])}")
-                c2.markdown(f"**UHID:** {patient_info.get('uhid') or sel_record.get('uhid') or '—'}")
-                c3.markdown(f"**Mobile:** {patient_info.get('mobile_number') or sel_record.get('mobile_number') or '—'}")
+                c2.markdown(f"**UHID:** {patient_info.get('uhid') or sel_record.get('uhid') or '-'}")
+                c3.markdown(f"**Mobile:** {patient_info.get('mobile_number') or sel_record.get('mobile_number') or '-'}")
                 c4.markdown(f"**Department:** {clinical_info.get('department', sel_record.get('department_name'))}")
 
                 c5, c6, c7, c8 = st.columns(4)
@@ -779,7 +928,7 @@ try:
                 min_e = billing.format_inr(fin_info.get("min_estimate", sel_record["min_estimate"]))
                 max_e = billing.format_inr(fin_info.get("max_estimate", sel_record["max_estimate"]))
                 rng_p = fin_info.get("estimate_range_pct", "10")
-                st.caption(f"**Estimated Cost Range (±{rng_p}%):** {min_e} — {max_e}")
+                st.caption(f"**Estimated Cost Range (+/-{rng_p}%):** {min_e} to {max_e}")
 
                 # Line items table
                 if stored_items:
@@ -795,15 +944,15 @@ try:
                                 "Gross Amount": billing.format_inr(item.get("amount", 0)),
                                 "Discount": f"-{billing.format_inr(item.get('discount_amount', 0))}"
                                 if Decimal(str(item.get("discount_amount", 0))) > Decimal(0)
-                                else "—",
+                                else "-",
                                 "Net Amount": billing.format_inr(item.get("net_amount", 0)),
                                 "Taxable": "Yes" if item.get("is_taxable") else "No",
                             }
                         )
                     st.dataframe(pd.DataFrame(table_data), width="stretch", hide_index=True)
 
-                # Feature 5: Update Treatment Outcome & Final Bill Amount
-                with st.expander("📝 Update Treatment Outcome & Final Bill Amount", expanded=True):
+                # Update Treatment Outcome & Final Bill Amount
+                with st.expander("Update Treatment Outcome & Final Bill Amount", expanded=True):
                     col_out1, col_out2, col_out3 = st.columns([1.5, 2, 1.5])
                     with col_out1:
                         is_conv = st.checkbox(
@@ -820,24 +969,24 @@ try:
                         )
                     with col_out3:
                         st.markdown("<br/>", unsafe_allow_html=True)
-                        if st.button("💾 Save Outcome", key=f"save_outcome_{selected_est_num}", width="stretch"):
+                        if st.button("Save Outcome", key=f"save_outcome_{selected_est_num}", width="stretch"):
                             if act_bill.strip():
                                 v_act, d_act, err_act = billing.validate_money_field(act_bill, "Actual Bill Amount")
                                 if not v_act:
                                     st.error(err_act)
                                 else:
                                     database.update_estimate_outcome(conn, selected_est_num, is_conv, str(d_act))
-                                    st.success("✅ Treatment outcome & actual bill updated.")
+                                    st.success("Treatment outcome & actual bill updated.")
                                     st.rerun()
                             else:
                                 database.update_estimate_outcome(conn, selected_est_num, is_conv, None)
-                                st.success("✅ Treatment outcome updated.")
+                                st.success("Treatment outcome updated.")
                                 st.rerun()
 
                     if sel_record.get("actual_amount"):
                         acc = billing.calculate_accuracy(sel_record["total_amount"], sel_record["actual_amount"])
                         if acc is not None:
-                            st.info(f"📊 **Accuracy Variance:** **{acc:.2f}%** variance (|Actual − Estimated| ÷ Actual × 100%) against estimated {billing.format_inr(sel_record['total_amount'])}.")
+                            st.info(f"**Accuracy Variance:** **{acc:.2f}%** variance (|Actual - Estimated| / Actual * 100%) against estimated {billing.format_inr(sel_record['total_amount'])}.")
 
                 # Action Buttons: Reprint PDF & Edit/Revise
                 col_pdf, col_rev = st.columns([2, 2])
@@ -849,7 +998,7 @@ try:
                     safe_uhid = re.sub(r'[^\w\-]', '_', str(p_uhid).strip())[:15]
                     reprint_fname = f"{safe_name}_{safe_uhid}_{selected_est_num}.pdf"
                     st.download_button(
-                        label=f"📄 Reprint PDF ({selected_est_num})",
+                        label=f"Reprint PDF ({selected_est_num})",
                         data=reprint_pdf_bytes,
                         file_name=reprint_fname,
                         mime="application/pdf",
@@ -857,8 +1006,7 @@ try:
                         key="btn_reprint_pdf",
                     )
                 with col_rev:
-                    # Feature 4: Allow estimate to be edited once created
-                    if st.button("✏️ Revise / Edit Estimate", width="stretch", key="btn_revise_est", type="secondary"):
+                    if st.button("Revise / Edit Estimate", width="stretch", key="btn_revise_est", type="secondary"):
                         st.session_state["revision_source"] = sel_record
                         st.session_state["input_patient_name"] = sel_record["patient_name"]
                         st.session_state["input_uhid"] = sel_record.get("uhid") or ""
@@ -873,14 +1021,15 @@ try:
                         st.session_state["active_estimate"] = None
                         st.session_state["saved_estimate_number"] = None
                         st.session_state["inputs_dirty"] = True
-                        st.session_state["nav_option"] = "🏥 Generate Estimate"
+                        st.session_state["inline_editing"] = True
+                        st.session_state["nav_option"] = "Generate Estimate"
                         st.rerun()
 
     # ==========================================================================
     # VIEW 3: DASHBOARD & EXCEL LEDGER
     # ==========================================================================
-    elif navigation_option == "📊 Dashboard":
-        st.header("📊 Estimates Performance Dashboard & Analytics")
+    elif navigation_option == "Dashboard":
+        st.header("Estimates Performance Dashboard & Analytics")
         st.caption("Overview of estimates issued, patient conversion rates, forecasting accuracy, and complete ledger export.")
 
         all_estimates = database.get_estimates(conn, limit=None)
@@ -912,9 +1061,9 @@ try:
             k3.metric("Patient Conversion", f"{converted_count} ({conv_rate:.1f}%)", help="Percentage of estimates where patient accepted treatment")
             k4.metric("Average Estimate", billing.format_inr(avg_est_value, whole_rupees=True))
             if avg_acc is not None:
-                k5.metric("Avg Variance (Accuracy)", f"{avg_acc:.2f}%", help="|Actual − Estimated| ÷ Actual × 100% across estimates with final bill entered")
+                k5.metric("Avg Variance (Accuracy)", f"{avg_acc:.2f}%", help="|Actual - Estimated| / Actual * 100% across estimates with final bill entered")
             else:
-                k5.metric("Avg Variance (Accuracy)", "—", help="Record final bill amounts in Estimate History to track forecasting variance")
+                k5.metric("Avg Variance (Accuracy)", "-", help="Record final bill amounts in Estimate History to track forecasting variance")
 
             st.divider()
 
@@ -945,26 +1094,26 @@ try:
 
             st.divider()
 
-            # 3. Excel Export & Full Running Ledger (Feature 7)
+            # 3. Excel Export & Full Running Ledger
             col_led_title, col_led_btn = st.columns([3, 2])
             with col_led_title:
-                st.subheader("📋 Running Estimates Spreadsheet Database")
+                st.subheader("Running Estimates Spreadsheet Database")
             with col_led_btn:
                 excel_rows = []
                 for e in all_estimates:
                     acc_val = billing.calculate_accuracy(e["total_amount"], e.get("actual_amount"))
-                    acc_text = f"{acc_val:.2f}%" if acc_val is not None else "—"
+                    acc_text = f"{acc_val:.2f}%" if acc_val is not None else "-"
                     excel_rows.append({
                         "Estimate Number": e["estimate_number"],
-                        "Revision Of": e.get("revision_of") or "—",
+                        "Revision Of": e.get("revision_of") or "-",
                         "Date": format_history_timestamp(e.get("created_at")),
                         "Patient Name": e["patient_name"],
-                        "UHID": e.get("uhid") or "—",
-                        "Mobile Number": e.get("mobile_number") or "—",
-                        "Department": e.get("department_name") or "—",
-                        "Doctor": e.get("doctor_name") or "—",
-                        "Procedure": e.get("procedure_name") or "—",
-                        "Room Type": e.get("room_type_name") or "—",
+                        "UHID": e.get("uhid") or "-",
+                        "Mobile Number": e.get("mobile_number") or "-",
+                        "Department": e.get("department_name") or "-",
+                        "Doctor": e.get("doctor_name") or "-",
+                        "Procedure": e.get("procedure_name") or "-",
+                        "Room Type": e.get("room_type_name") or "-",
                         "Stay Days": e.get("stay_days", 1),
                         "Subtotal (₹)": e.get("subtotal", 0),
                         "Discount %": e.get("discount_pct", 0),
@@ -975,7 +1124,7 @@ try:
                         "Min Range (₹)": e.get("min_estimate", 0),
                         "Max Range (₹)": e.get("max_estimate", 0),
                         "Converted": "Yes" if e.get("converted") == 1 else "No",
-                        "Actual Bill (₹)": e.get("actual_amount") or "—",
+                        "Actual Bill (₹)": e.get("actual_amount") or "-",
                         "Accuracy Variance (%)": acc_text,
                         "Remarks": e.get("remarks") or "",
                     })
@@ -991,7 +1140,7 @@ try:
                         ws.column_dimensions[col_letter].width = min(max(max_len + 3, 12), 40)
 
                 st.download_button(
-                    label="📥 Download Spreadsheet Database (.xlsx)",
+                    label="Download Spreadsheet Database (.xlsx)",
                     data=excel_buffer.getvalue(),
                     file_name=f"Hospital_Estimates_Database_{datetime.now().strftime('%Y%m%d')}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -1002,10 +1151,10 @@ try:
             st.dataframe(df_export, width="stretch", hide_index=True)
 
     # ==========================================================================
-    # VIEW 3: ADMIN PORTAL (Phase 6)
+    # VIEW 4: ADMIN PORTAL
     # ==========================================================================
-    elif navigation_option == "⚙️ Admin Portal":
-        st.header("⚙️ Administration & Tariff Management")
+    elif navigation_option == "Admin Portal":
+        st.header("Administration & Tariff Management")
         st.caption("Secure master data management, system settings, CSV import/export, and database backups.")
 
         # Auth Gate: First-Run Setup vs Login
@@ -1013,12 +1162,12 @@ try:
 
         if not admin_configured:
             # 1. FIRST-RUN SETUP
-            st.info("👋 **Welcome to First-Run Setup!** No administrator account exists yet. Create the primary admin account to get started.")
+            st.info("**Welcome to First-Run Setup:** No administrator account exists yet. Create the primary admin account to get started.")
             with st.form("admin_setup_form"):
                 setup_user = st.text_input("Administrator Username", value="admin")
                 setup_pwd = st.text_input("Password (min 8 characters)", type="password")
                 setup_pwd_confirm = st.text_input("Confirm Password", type="password")
-                setup_submitted = st.form_submit_button("🚀 Initialize Admin Account", type="primary", width="stretch")
+                setup_submitted = st.form_submit_button("Initialize Admin Account", type="primary", width="stretch")
 
                 if setup_submitted:
                     if not setup_user.strip():
@@ -1036,11 +1185,11 @@ try:
 
         elif not st.session_state.get("admin_authenticated", False):
             # 2. LOGIN FORM WITH ATTEMPT DELAY
-            st.subheader("🔐 Administrator Login")
+            st.subheader("Administrator Login")
             with st.form("admin_login_form"):
                 login_user = st.text_input("Username")
                 login_pwd = st.text_input("Password", type="password")
-                login_submitted = st.form_submit_button("🔓 Log In", type="primary", width="stretch")
+                login_submitted = st.form_submit_button("Log In", type="primary", width="stretch")
 
                 if login_submitted:
                     if database.verify_admin_credentials(conn, login_user.strip(), login_pwd):
@@ -1050,7 +1199,7 @@ try:
                         st.rerun()
                     else:
                         import time
-                        time.sleep(1)  # Intentional delay against brute force
+                        time.sleep(1)
                         st.error("Invalid username or password.")
 
         else:
@@ -1059,11 +1208,12 @@ try:
             with top_c1:
                 st.write(f"Logged in as **{st.session_state.get('admin_username', 'admin')}**")
             with top_c2:
-                if st.button("🚪 Log Out", width="stretch"):
+                if st.button("Log Out", width="stretch"):
                     st.session_state["admin_authenticated"] = False
                     st.session_state["admin_username"] = None
                     st.session_state.pop("db_backup_bytes", None)
                     st.session_state.pop("db_backup_prepared_at", None)
+                    st.session_state["inline_editing"] = False
                     st.rerun()
 
             if "admin_flash_message" in st.session_state:
@@ -1072,14 +1222,14 @@ try:
             st.divider()
 
             admin_tabs = st.tabs([
-                "🛏️ Rooms",
-                "🏢 Departments",
-                "👨‍⚕️ Doctors",
-                "🩺 Procedures",
-                "⚙️ Settings",
-                "📊 CSV Import / Export",
-                "🔐 Change Password",
-                "💾 Database Backup",
+                "Rooms",
+                "Departments",
+                "Doctors",
+                "Procedures",
+                "Settings",
+                "CSV Import / Export",
+                "Change Password",
+                "Database Backup",
             ])
 
             # ------------------------------------------------------------------
@@ -1107,7 +1257,7 @@ try:
                         new_r_name = st.text_input("Room Category Name *")
                         new_r_rate = st.text_input("Daily Rate (₹) *", placeholder="e.g. 5500")
                         new_r_desc = st.text_input("Description", placeholder="e.g. Single room, attendant bed")
-                        add_r_sub = st.form_submit_button("➕ Add Room Category", width="stretch")
+                        add_r_sub = st.form_submit_button("Add Room Category", width="stretch")
                         if add_r_sub:
                             if not new_r_name.strip():
                                 st.error("Room category name cannot be blank.")
@@ -1138,7 +1288,7 @@ try:
                             edit_r_name = st.text_input("Room Category Name", value=target_r["name"], key=f"edit_r_name_{sel_r_id}")
                             edit_r_rate = st.text_input("Daily Rate (₹)", value=str(target_r["daily_rate"]), key=f"edit_r_rate_{sel_r_id}")
                             edit_r_desc = st.text_input("Description", value=target_r["description"] or "", key=f"edit_r_desc_{sel_r_id}")
-                            edit_r_sub = st.form_submit_button("💾 Save Changes", width="stretch")
+                            edit_r_sub = st.form_submit_button("Save Changes", width="stretch")
                             if edit_r_sub:
                                 if not edit_r_name.strip():
                                     st.error("Room category name cannot be blank.")
@@ -1156,12 +1306,12 @@ try:
 
                         # Soft Delete / Restore Action (NO HARD DELETE)
                         if target_r["is_active"]:
-                            if st.button("🚫 Deactivate (Soft Delete)", key="btn_deactivate_room", width="stretch"):
+                            if st.button("Deactivate (Soft Delete)", key="btn_deactivate_room", width="stretch"):
                                 database.toggle_room_type_status(conn, sel_r_id, 0)
                                 st.warning(f"Room category '{target_r['name']}' deactivated.")
                                 st.rerun()
                         else:
-                            if st.button("✅ Reactivate (Restore)", key="btn_reactivate_room", width="stretch"):
+                            if st.button("Reactivate (Restore)", key="btn_reactivate_room", width="stretch"):
                                 database.toggle_room_type_status(conn, sel_r_id, 1)
                                 st.success(f"Room category '{target_r['name']}' restored to active.")
                                 st.rerun()
@@ -1181,7 +1331,7 @@ try:
                     st.write("##### Add New Department")
                     with st.form("add_dept_form"):
                         new_d_name = st.text_input("Department Name *")
-                        add_d_sub = st.form_submit_button("➕ Add Department", width="stretch")
+                        add_d_sub = st.form_submit_button("Add Department", width="stretch")
                         if add_d_sub:
                             if not new_d_name.strip():
                                 st.error("Department name cannot be blank.")
@@ -1206,7 +1356,7 @@ try:
                         target_d = d_edit_map[sel_d_id]
                         with st.form("edit_dept_form"):
                             edit_d_name = st.text_input("Department Name", value=target_d["name"], key=f"edit_d_name_{sel_d_id}")
-                            edit_d_sub = st.form_submit_button("💾 Rename Department", width="stretch")
+                            edit_d_sub = st.form_submit_button("Rename Department", width="stretch")
                             if edit_d_sub:
                                 if not edit_d_name.strip():
                                     st.error("Department name cannot be blank.")
@@ -1219,12 +1369,12 @@ try:
                                         st.error(f"Cannot rename department: {e}")
 
                         if target_d["is_active"]:
-                            if st.button("🚫 Deactivate Department", key="btn_deact_dept", width="stretch"):
+                            if st.button("Deactivate Department", key="btn_deact_dept", width="stretch"):
                                 database.toggle_department_status(conn, sel_d_id, 0)
                                 st.warning(f"Department '{target_d['name']}' deactivated.")
                                 st.rerun()
                         else:
-                            if st.button("✅ Reactivate Department", key="btn_react_dept", width="stretch"):
+                            if st.button("Reactivate Department", key="btn_react_dept", width="stretch"):
                                 database.toggle_department_status(conn, sel_d_id, 1)
                                 st.success(f"Department '{target_d['name']}' restored.")
                                 st.rerun()
@@ -1240,11 +1390,15 @@ try:
 
                 doc_rows = []
                 for d in docs:
+                    s_type = d.get("surgeon_fee_type", "fixed")
+                    s_amt = billing.format_inr(d.get("surgeon_fee_amount", 0))
                     doc_rows.append({
                         "ID": d["id"],
                         "Doctor Name": d["name"],
                         "Department": d["department_name"],
                         "Consultation Fee": billing.format_inr(d["consultation_fee"]),
+                        "Surgeon Fee Mode": "Fixed Amount" if s_type == "fixed" else "Percentage",
+                        "Surgeon Fee Amount": s_amt,
                         "Surgeon Fee %": f"{d['surgeon_fee_pct']}%",
                         "Specialization": d["specialization"] or "",
                         "Status": "Active" if d["is_active"] else "Inactive",
@@ -1265,10 +1419,12 @@ try:
                                 format_func=lambda x: all_depts_map.get(x, ""),
                                 key="add_doc_dept",
                             )
-                            new_doc_fee = st.text_input("Consultation Fee (₹) *", placeholder="e.g. 1500")
-                            new_doc_pct = st.number_input("Surgeon Fee (%) *", min_value=0, max_value=100, value=40, step=5)
+                            new_doc_fee = st.text_input("Consultation Fee (INR) *", placeholder="e.g. 1500")
+                            new_doc_pct = st.number_input("Surgeon Fee (%) *", min_value=0, max_value=100, value=40, step=5, key="add_doc_surg_pct")
                             new_doc_spec = st.text_input("Specialization", placeholder="e.g. Cardiothoracic Surgeon")
-                            add_doc_sub = st.form_submit_button("➕ Add Doctor", width="stretch")
+                            new_doc_fee_mode = st.radio("Surgeon Fee Mode", options=["Fixed Amount", "Percentage of Base Tariff"], horizontal=True, key="add_doc_fee_mode")
+                            new_doc_surg_amt = st.number_input("Surgeon Fee Amount (INR)", min_value=0, value=35000, step=1000, key="add_doc_surg_amt")
+                            add_doc_sub = st.form_submit_button("Add Doctor", width="stretch")
                             if add_doc_sub:
                                 if not new_doc_name.strip():
                                     st.error("Doctor name cannot be blank.")
@@ -1280,6 +1436,7 @@ try:
                                         st.error("; ".join(errs))
                                     else:
                                         try:
+                                            s_type = "fixed" if new_doc_fee_mode == "Fixed Amount" else "percentage"
                                             database.save_doctor(
                                                 conn,
                                                 name=new_doc_name.strip(),
@@ -1287,6 +1444,8 @@ try:
                                                 consultation_fee=fee_dec,
                                                 surgeon_fee_pct=pct_val,
                                                 specialization=new_doc_spec.strip(),
+                                                surgeon_fee_type=s_type,
+                                                surgeon_fee_amount=int(new_doc_surg_amt),
                                             )
                                             st.session_state["admin_flash_message"] = f"Doctor '{new_doc_name.strip()}' added successfully."
                                             st.rerun()
@@ -1313,7 +1472,7 @@ try:
                                 format_func=lambda x: all_depts_map.get(x, ""),
                                 key=f"edit_doc_dept_{sel_doc_id}",
                             )
-                            edit_doc_fee = st.text_input("Consultation Fee (₹)", value=str(target_doc["consultation_fee"]), key=f"edit_doc_fee_{sel_doc_id}")
+                            edit_doc_fee = st.text_input("Consultation Fee (INR)", value=str(target_doc["consultation_fee"]), key=f"edit_doc_fee_{sel_doc_id}")
                             edit_doc_pct = st.number_input(
                                 "Surgeon Fee (%)",
                                 min_value=0,
@@ -1323,7 +1482,22 @@ try:
                                 key=f"edit_doc_pct_{sel_doc_id}",
                             )
                             edit_doc_spec = st.text_input("Specialization", value=target_doc["specialization"] or "", key=f"edit_doc_spec_{sel_doc_id}")
-                            edit_doc_sub = st.form_submit_button("💾 Save Doctor Changes", width="stretch")
+                            curr_s_type = target_doc.get("surgeon_fee_type", "fixed")
+                            edit_doc_fee_mode = st.radio(
+                                "Surgeon Fee Mode",
+                                options=["Fixed Amount", "Percentage of Base Tariff"],
+                                index=0 if curr_s_type == "fixed" else 1,
+                                horizontal=True,
+                                key=f"edit_doc_mode_{sel_doc_id}",
+                            )
+                            edit_doc_surg_amt = st.number_input(
+                                "Surgeon Fee Amount (INR)",
+                                min_value=0,
+                                value=int(target_doc.get("surgeon_fee_amount") or 0),
+                                step=1000,
+                                key=f"edit_doc_amt_{sel_doc_id}",
+                            )
+                            edit_doc_sub = st.form_submit_button("Save Doctor Changes", width="stretch")
                             if edit_doc_sub:
                                 if not edit_doc_name.strip():
                                     st.error("Doctor name cannot be blank.")
@@ -1335,6 +1509,7 @@ try:
                                         st.error("; ".join(errs))
                                     else:
                                         try:
+                                            s_type = "fixed" if edit_doc_fee_mode == "Fixed Amount" else "percentage"
                                             database.save_doctor(
                                                 conn,
                                                 name=edit_doc_name.strip(),
@@ -1343,6 +1518,8 @@ try:
                                                 surgeon_fee_pct=pct_val,
                                                 specialization=edit_doc_spec.strip(),
                                                 doc_id=sel_doc_id,
+                                                surgeon_fee_type=s_type,
+                                                surgeon_fee_amount=int(edit_doc_surg_amt),
                                             )
                                             st.session_state["admin_flash_message"] = f"Doctor '{edit_doc_name.strip()}' updated successfully."
                                             st.rerun()
@@ -1350,12 +1527,12 @@ try:
                                             st.error(f"Cannot update doctor: {e}")
 
                         if target_doc["is_active"]:
-                            if st.button("🚫 Deactivate Doctor", key="btn_deact_doc", width="stretch"):
+                            if st.button("Deactivate Doctor", key="btn_deact_doc", width="stretch"):
                                 database.toggle_doctor_status(conn, sel_doc_id, 0)
                                 st.warning(f"Doctor '{target_doc['name']}' deactivated.")
                                 st.rerun()
                         else:
-                            if st.button("✅ Reactivate Doctor", key="btn_react_doc", width="stretch"):
+                            if st.button("Reactivate Doctor", key="btn_react_doc", width="stretch"):
                                 database.toggle_doctor_status(conn, sel_doc_id, 1)
                                 st.success(f"Doctor '{target_doc['name']}' restored.")
                                 st.rerun()
@@ -1403,7 +1580,7 @@ try:
                             new_pr_cons = st.text_input("Consumables & Implants Cost (₹) *", placeholder="e.g. 160000")
                             new_pr_inv = st.text_input("Investigations & Diagnostics (₹) *", placeholder="e.g. 10000")
                             new_pr_stay = st.number_input("Default Length of Stay (Days) *", min_value=0, max_value=365, value=1)
-                            add_pr_sub = st.form_submit_button("➕ Add Procedure", width="stretch")
+                            add_pr_sub = st.form_submit_button("Add Procedure", width="stretch")
                             if add_pr_sub:
                                 if not new_pr_name.strip():
                                     st.error("Procedure name cannot be blank.")
@@ -1466,7 +1643,7 @@ try:
                                 value=int(target_pr["default_stay_days"]),
                                 key=f"edit_pr_stay_{sel_pr_id}",
                             )
-                            edit_pr_sub = st.form_submit_button("💾 Save Procedure Changes", width="stretch")
+                            edit_pr_sub = st.form_submit_button("Save Procedure Changes", width="stretch")
                             if edit_pr_sub:
                                 if not edit_pr_name.strip():
                                     st.error("Procedure name cannot be blank.")
@@ -1499,12 +1676,12 @@ try:
                                             st.error(f"Cannot update procedure: {e}")
 
                         if target_pr["is_active"]:
-                            if st.button("🚫 Deactivate Procedure", key="btn_deact_proc", width="stretch"):
+                            if st.button("Deactivate Procedure", key="btn_deact_proc", width="stretch"):
                                 database.toggle_procedure_status(conn, sel_pr_id, 0)
                                 st.warning(f"Procedure '{target_pr['name']}' deactivated.")
                                 st.rerun()
                         else:
-                            if st.button("✅ Reactivate Procedure", key="btn_react_proc", width="stretch"):
+                            if st.button("Reactivate Procedure", key="btn_react_proc", width="stretch"):
                                 database.toggle_procedure_status(conn, sel_pr_id, 1)
                                 st.success(f"Procedure '{target_pr['name']}' restored.")
                                 st.rerun()
@@ -1533,13 +1710,13 @@ try:
                     with col_s4:
                         cont_r = st.text_input("Contingency Rate (%)", value=curr_settings.get("contingency_rate", "10"))
                     with col_s5:
-                        rng_p = st.text_input("Estimate Range Band (±%)", value=curr_settings.get("estimate_range_pct", "10"))
+                        rng_p = st.text_input("Estimate Range Band (+/-%)", value=curr_settings.get("estimate_range_pct", "10"))
                     with col_s6:
                         val_d = st.text_input("Estimate Validity (Days)", value=curr_settings.get("validity_days", "15"))
 
                     disc_txt = st.text_area("Disclaimer Text", value=curr_settings.get("disclaimer_text", ""))
 
-                    st.write("##### 🧾 Category-wise Tax Applicability (GST)")
+                    st.write("##### Category-wise Tax Applicability (GST)")
                     st.caption("Healthcare services by clinical establishments are generally exempt under GST (tax rate 0%). Note: Room rent exceeding ₹5,000 per day outside ICU may attract 5% GST without ITC. Consult finance before enabling tax on any category.")
 
                     tax_c1, tax_c2 = st.columns(2)
@@ -1581,7 +1758,7 @@ try:
                             key="set_tax_cat_investigations",
                         )
 
-                    save_settings_sub = st.form_submit_button("💾 Save System Settings", type="primary", width="stretch")
+                    save_settings_sub = st.form_submit_button("Save System Settings", type="primary", width="stretch")
                     if save_settings_sub:
                         if not h_name.strip():
                             st.error("Hospital Name cannot be blank (required).")
@@ -1644,7 +1821,7 @@ try:
 
                 # Export Column
                 with col_exp:
-                    st.write(f"##### 📥 Export {csv_category}")
+                    st.write(f"##### Export {csv_category}")
                     if csv_category == "Departments":
                         exp_bytes = database.export_departments_csv(conn)
                         exp_fname = "departments.csv"
@@ -1659,7 +1836,7 @@ try:
                         exp_fname = "procedures.csv"
 
                     st.download_button(
-                        label=f"📥 Download {exp_fname}",
+                        label=f"Download {exp_fname}",
                         data=exp_bytes,
                         file_name=exp_fname,
                         mime="text/csv",
@@ -1669,7 +1846,7 @@ try:
 
                 # Import Column
                 with col_imp:
-                    st.write(f"##### 📤 Import {csv_category}")
+                    st.write(f"##### Import {csv_category}")
                     uploaded_csv = st.file_uploader(
                         f"Upload {csv_category} CSV",
                         type=["csv"],
@@ -1692,10 +1869,10 @@ try:
                                         ins, upd = database.import_doctors_csv(conn, csv_raw_bytes)
                                     else:
                                         ins, upd = database.import_procedures_csv(conn, csv_raw_bytes)
-                                    st.session_state["admin_flash_message"] = f"✅ Import successful: {ins} added, {upd} updated."
+                                    st.session_state["admin_flash_message"] = f"Import successful: {ins} added, {upd} updated."
                                     st.rerun()
                                 except Exception as e:
-                                    st.error(f"❌ Import failed (all changes rolled back): {e}")
+                                    st.error(f"Import failed (all changes rolled back): {e}")
                         except Exception as e:
                             st.error(f"Cannot parse CSV file: {e}")
 
@@ -1703,7 +1880,7 @@ try:
             # TAB 7: CHANGE PASSWORD
             # ------------------------------------------------------------------
             with admin_tabs[6]:
-                st.subheader("🔐 Change Administrator Password")
+                st.subheader("Change Administrator Password")
                 with st.form("change_pwd_form"):
                     curr_pwd = st.text_input("Current Password", type="password")
                     new_pwd = st.text_input("New Password (min 8 characters)", type="password")
@@ -1728,22 +1905,22 @@ try:
             # TAB 8: DATABASE BACKUP
             # ------------------------------------------------------------------
             with admin_tabs[7]:
-                st.subheader("💾 Database Backup & Disaster Recovery")
+                st.subheader("Database Backup & Disaster Recovery")
                 st.write(
                     "Generate a hot, transactional snapshot of the entire SQLite database (`hospital.db`). "
                     "The backup is created using SQLite's native backup API and checkpointed safely even with active readers/writers in WAL mode."
                 )
 
-                if st.button("📦 Prepare Backup Snapshot", key="btn_prepare_backup", width="stretch"):
+                if st.button("Prepare Backup Snapshot", key="btn_prepare_backup", width="stretch"):
                     st.session_state["db_backup_bytes"] = database.backup_database(conn)
                     st.session_state["db_backup_prepared_at"] = datetime.now().strftime("%d-%b-%Y %H:%M:%S")
                     st.rerun()
 
                 if "db_backup_bytes" in st.session_state:
                     prep_time = st.session_state.get("db_backup_prepared_at", "just now")
-                    st.success(f"✅ Backup snapshot ready (prepared at {prep_time}). Click below to download.")
+                    st.success(f"Backup snapshot ready (prepared at {prep_time}). Click below to download.")
                     st.download_button(
-                        label="💾 Download Database Backup (hospital_backup.db)",
+                        label="Download Database Backup (hospital_backup.db)",
                         data=st.session_state["db_backup_bytes"],
                         file_name="hospital_backup.db",
                         mime="application/octet-stream",

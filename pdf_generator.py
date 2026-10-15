@@ -259,7 +259,7 @@ def generate_estimate_pdf(
         story.append(draft_banner)
         story.append(Spacer(1, 2 * mm))
     else:
-        doc_header_text = f"ESTIMATED HOSPITAL TARIFF & BILLING PROPOSAL — {est_num}"
+        doc_header_text = f"ESTIMATED HOSPITAL TARIFF & BILLING PROPOSAL - {est_num}"
 
     story.append(Paragraph(f"<b>{doc_header_text}</b>", style_title))
     story.append(Spacer(1, 4 * mm))
@@ -307,9 +307,9 @@ def generate_estimate_pdf(
         patient_info.append(
             [
                 Paragraph("<b>UHID:</b>", style_cell_bold),
-                Paragraph(uhid_val or "—", style_cell),
+                Paragraph(uhid_val or "-", style_cell),
                 Paragraph("<b>Mobile Number:</b>", style_cell_bold),
-                Paragraph(mobile_val or "—", style_cell),
+                Paragraph(mobile_val or "-", style_cell),
             ]
         )
     if remarks_val:
@@ -344,107 +344,247 @@ def generate_estimate_pdf(
     story.append(patient_table)
     story.append(Spacer(1, 5 * mm))
 
-    # 4. Itemized Cost Table
-    table_rows = [
-        [
+    # 4. Itemized Cost Table (Comparative or Single-Room)
+    comp_estimates = data.get("comparative_estimates", [])
+    if comp_estimates:
+        primary_room = xml_escape(str(clinical.get("room_type", "Primary Room")))
+        num_comps = len(comp_estimates)
+        col_w = max(28.0, min(36.0, 96.0 / (num_comps + 1))) * mm
+        idx_w = 7 * mm
+        cat_w = 26 * mm
+        desc_w = 180 * mm - idx_w - cat_w - (col_w * (num_comps + 1))
+        col_widths = [idx_w, desc_w, cat_w, col_w] + [col_w] * num_comps
+
+        header_row = [
             Paragraph("<b>#</b>", style_cell_bold),
             Paragraph("<b>Billing Item & Description</b>", style_cell_bold),
             Paragraph("<b>Category</b>", style_cell_bold),
-            Paragraph("<b>Taxable</b>", style_cell_bold),
-            Paragraph("<b>Amount (INR)</b>", style_cell_right_bold),
+            Paragraph(f"<b>{primary_room} (INR)</b>", style_cell_right_bold),
         ]
-    ]
+        for comp in comp_estimates:
+            c_name = xml_escape(str(comp.get("clinical", {}).get("room_type", "Comparative Room")))
+            header_row.append(Paragraph(f"<b>{c_name} (INR)</b>", style_cell_right_bold))
+        table_rows = [header_row]
 
-    for idx, item in enumerate(line_items, start=1):
-        is_tax = "Yes" if item.get("is_taxable") else "No"
-        amt_str = format_inr(item.get("amount", 0))
-        cat_val = xml_escape(str(item.get("category", "")))
-        desc_val = xml_escape(str(item.get("description", "")))
-        table_rows.append(
-            [
+        for idx, item in enumerate(line_items, start=1):
+            cat_val = xml_escape(str(item.get("category", "")))
+            desc_val = xml_escape(str(item.get("description", "")))
+            primary_amt = format_inr(item.get("amount", 0))
+
+            row = [
                 Paragraph(str(idx), style_cell),
                 Paragraph(f"<b>{cat_val}</b><br/>{desc_val}", style_cell),
                 Paragraph(cat_val, style_cell),
-                Paragraph(is_tax, style_cell),
-                Paragraph(amt_str, style_cell_right),
+                Paragraph(primary_amt, style_cell_right),
             ]
+            for comp in comp_estimates:
+                comp_items = comp.get("line_items", [])
+                if idx - 1 < len(comp_items):
+                    c_amt = format_inr(comp_items[idx - 1].get("amount", 0))
+                else:
+                    c_amt = primary_amt
+                row.append(Paragraph(c_amt, style_cell_right))
+            table_rows.append(row)
+
+        totals_start_row = len(table_rows)
+
+        # Subtotal
+        sub_row = [Paragraph("<b>Subtotal:</b>", style_cell_right_bold), "", ""]
+        sub_row.append(Paragraph(f"<b>{format_inr(fin.get('subtotal', 0))}</b>", style_cell_right_bold))
+        for comp in comp_estimates:
+            c_sub = format_inr(comp.get("financials", {}).get("subtotal", 0))
+            sub_row.append(Paragraph(f"<b>{c_sub}</b>", style_cell_right_bold))
+        table_rows.append(sub_row)
+
+        # Discount
+        disc_pct = Decimal(str(fin.get("discount_pct", "0")))
+        if disc_pct > Decimal("0"):
+            disc_row = [Paragraph(f"Discount ({disc_pct}%):", style_cell_right), "", ""]
+            disc_row.append(Paragraph(f"-{format_inr(fin.get('discount_amount', 0))}", style_cell_right))
+            for comp in comp_estimates:
+                c_disc = format_inr(comp.get("financials", {}).get("discount_amount", 0))
+                disc_row.append(Paragraph(f"-{c_disc}", style_cell_right))
+            table_rows.append(disc_row)
+
+            net_row = [Paragraph("Net Base:", style_cell_right), "", ""]
+            net_row.append(Paragraph(format_inr(fin.get("net_base", 0)), style_cell_right))
+            for comp in comp_estimates:
+                c_net = format_inr(comp.get("financials", {}).get("net_base", 0))
+                net_row.append(Paragraph(c_net, style_cell_right))
+            table_rows.append(net_row)
+
+        # Contingency
+        cont_pct = fin.get("contingency_pct", "10")
+        cont_row = [Paragraph(f"Contingency Buffer ({cont_pct}%):", style_cell_right), "", ""]
+        cont_row.append(Paragraph(format_inr(fin.get("contingency_amount", 0)), style_cell_right))
+        for comp in comp_estimates:
+            c_cont = format_inr(comp.get("financials", {}).get("contingency_amount", 0))
+            cont_row.append(Paragraph(c_cont, style_cell_right))
+        table_rows.append(cont_row)
+
+        # Tax
+        tax_pct = Decimal(str(fin.get("tax_pct", "0")))
+        if tax_pct > Decimal("0"):
+            tax_row = [Paragraph(f"GST / Tax ({tax_pct}%):", style_cell_right), "", ""]
+            tax_row.append(Paragraph(format_inr(fin.get("tax_amount", 0)), style_cell_right))
+            for comp in comp_estimates:
+                c_tax = format_inr(comp.get("financials", {}).get("tax_amount", 0))
+                tax_row.append(Paragraph(c_tax, style_cell_right))
+            table_rows.append(tax_row)
+
+        # Grand Total
+        tot_row = [Paragraph("<b>TOTAL ESTIMATE:</b>", style_cell_right_bold), "", ""]
+        tot_row.append(Paragraph(f"<b>{format_inr(fin.get('total_amount', 0))}</b>", style_cell_right_bold))
+        for comp in comp_estimates:
+            c_tot = format_inr(comp.get("financials", {}).get("total_amount", 0))
+            tot_row.append(Paragraph(f"<b>{c_tot}</b>", style_cell_right_bold))
+        table_rows.append(tot_row)
+
+        totals_end_row = len(table_rows) - 1
+
+        item_table = Table(table_rows, colWidths=col_widths)
+        t_styles = [
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2B6CB0")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("GRID", (0, 0), (-1, len(line_items)), 0.5, colors.HexColor("#CBD5E0")),
+            ("TOPPADDING", (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("LINEBELOW", (0, 0), (-1, 0), 1.5, colors.HexColor("#1A365D")),
+            ("BACKGROUND", (0, totals_end_row), (-1, totals_end_row), colors.HexColor("#EBF8FF")),
+            ("BOX", (0, totals_end_row), (-1, totals_end_row), 1, colors.HexColor("#2B6CB0")),
+        ]
+        for r in range(totals_start_row, totals_end_row + 1):
+            t_styles.append(("SPAN", (0, r), (2, r)))
+            t_styles.append(("ALIGN", (0, r), (2, r), "RIGHT"))
+
+        item_table.setStyle(TableStyle(t_styles))
+        story.append(item_table)
+        story.append(Spacer(1, 4 * mm))
+
+        # Comparative Range Box
+        range_pct = fin.get("estimate_range_pct", "10")
+        range_lines = [f"<b>Expected Cost Ranges (+/-{range_pct}%):</b>"]
+        range_lines.append(f"- <b>{primary_room}:</b> {format_inr(fin.get('min_estimate', 0))} to {format_inr(fin.get('max_estimate', 0))}")
+        for comp in comp_estimates:
+            c_name = xml_escape(str(comp.get("clinical", {}).get("room_type", "Comparative Room")))
+            c_fin = comp.get("financials", {})
+            range_lines.append(f"- <b>{c_name}:</b> {format_inr(c_fin.get('min_estimate', 0))} to {format_inr(c_fin.get('max_estimate', 0))}")
+        range_lines.append("<i>(Accounts for minor variations in consumable utilization, diagnostics, or clinical course)</i>")
+        range_text = "<br/>".join(range_lines)
+
+        range_box = Table([[Paragraph(range_text, style_cell)]], colWidths=[180 * mm])
+        range_box.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#FEFCBF")),
+                    ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#D69E2E")),
+                    ("TOPPADDING", (0, 0), (-1, -1), 5),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 8),
+                ]
+            )
         )
+        story.append(range_box)
+        story.append(Spacer(1, 5 * mm))
 
-    # Financial Totals Rows - Spanning Columns 0-3 to prevent wrapping
-    totals_start_row = len(table_rows)
-
-    subtotal_str = format_inr(fin.get("subtotal", 0))
-    table_rows.append([Paragraph("<b>Subtotal:</b>", style_cell_right_bold), "", "", "", Paragraph(f"<b>{subtotal_str}</b>", style_cell_right_bold)])
-
-    disc_pct = Decimal(str(fin.get("discount_pct", "0")))
-    if disc_pct > Decimal("0"):
-        disc_amt_str = f"-{format_inr(fin.get('discount_amount', 0))}"
-        table_rows.append([Paragraph(f"Discount ({disc_pct}%):", style_cell_right), "", "", "", Paragraph(disc_amt_str, style_cell_right)])
-        net_str = format_inr(fin.get("net_base", 0))
-        table_rows.append([Paragraph("Net Base:", style_cell_right), "", "", "", Paragraph(net_str, style_cell_right)])
-
-    cont_pct = fin.get("contingency_pct", "10")
-    cont_amt_str = format_inr(fin.get("contingency_amount", 0))
-    table_rows.append([Paragraph(f"Contingency Buffer ({cont_pct}%):", style_cell_right), "", "", "", Paragraph(cont_amt_str, style_cell_right)])
-
-    tax_pct = Decimal(str(fin.get("tax_pct", "0")))
-    if tax_pct > Decimal("0"):
-        tax_amt_str = format_inr(fin.get("tax_amount", 0))
-        table_rows.append([Paragraph(f"GST / Tax ({tax_pct}%):", style_cell_right), "", "", "", Paragraph(tax_amt_str, style_cell_right)])
-
-    grand_total_str = format_inr(fin.get("total_amount", 0))
-    table_rows.append([Paragraph("<b>TOTAL ESTIMATE:</b>", style_cell_right_bold), "", "", "", Paragraph(f"<b>{grand_total_str}</b>", style_cell_right_bold)])
-
-    totals_end_row = len(table_rows) - 1
-
-    item_table = Table(table_rows, colWidths=[8 * mm, 80 * mm, 40 * mm, 18 * mm, 34 * mm])
-    t_styles = [
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2B6CB0")),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-        ("GRID", (0, 0), (-1, len(line_items)), 0.5, colors.HexColor("#CBD5E0")),
-        ("TOPPADDING", (0, 0), (-1, -1), 4),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("LINEBELOW", (0, 0), (-1, 0), 1.5, colors.HexColor("#1A365D")),
-        # Highlight grand total row
-        ("BACKGROUND", (0, totals_end_row), (-1, totals_end_row), colors.HexColor("#EBF8FF")),
-        ("BOX", (0, totals_end_row), (-1, totals_end_row), 1, colors.HexColor("#2B6CB0")),
-    ]
-    # Span columns 0-3 for all totals rows and right align
-    for r in range(totals_start_row, totals_end_row + 1):
-        t_styles.append(("SPAN", (0, r), (3, r)))
-        t_styles.append(("ALIGN", (0, r), (3, r), "RIGHT"))
-
-    item_table.setStyle(TableStyle(t_styles))
-    story.append(item_table)
-    story.append(Spacer(1, 4 * mm))
-
-    # 5. Estimate Range Band Callout
-    min_est = format_inr(fin.get("min_estimate", 0))
-    max_est = format_inr(fin.get("max_estimate", 0))
-    range_pct = fin.get("estimate_range_pct", "10")
-
-    range_text = (
-        f"<b>Expected Cost Range (±{range_pct}%): {min_est} — {max_est}</b><br/>"
-        f"<i>(Accounts for minor variations in consumable utilization, diagnostics, or clinical course)</i>"
-    )
-    range_box = Table(
-        [[Paragraph(range_text, style_cell)]],
-        colWidths=[180 * mm],
-    )
-    range_box.setStyle(
-        TableStyle(
+    else:
+        table_rows = [
             [
-                ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#FEFCBF")),  # Soft Yellow
-                ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#D69E2E")),
-                ("TOPPADDING", (0, 0), (-1, -1), 5),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-                ("LEFTPADDING", (0, 0), (-1, -1), 8),
+                Paragraph("<b>#</b>", style_cell_bold),
+                Paragraph("<b>Billing Item & Description</b>", style_cell_bold),
+                Paragraph("<b>Category</b>", style_cell_bold),
+                Paragraph("<b>Taxable</b>", style_cell_bold),
+                Paragraph("<b>Amount (INR)</b>", style_cell_right_bold),
             ]
+        ]
+
+        for idx, item in enumerate(line_items, start=1):
+            is_tax = "Yes" if item.get("is_taxable") else "No"
+            amt_str = format_inr(item.get("amount", 0))
+            cat_val = xml_escape(str(item.get("category", "")))
+            desc_val = xml_escape(str(item.get("description", "")))
+            table_rows.append(
+                [
+                    Paragraph(str(idx), style_cell),
+                    Paragraph(f"<b>{cat_val}</b><br/>{desc_val}", style_cell),
+                    Paragraph(cat_val, style_cell),
+                    Paragraph(is_tax, style_cell),
+                    Paragraph(amt_str, style_cell_right),
+                ]
+            )
+
+        totals_start_row = len(table_rows)
+
+        subtotal_str = format_inr(fin.get("subtotal", 0))
+        table_rows.append([Paragraph("<b>Subtotal:</b>", style_cell_right_bold), "", "", "", Paragraph(f"<b>{subtotal_str}</b>", style_cell_right_bold)])
+
+        disc_pct = Decimal(str(fin.get("discount_pct", "0")))
+        if disc_pct > Decimal("0"):
+            disc_amt_str = f"-{format_inr(fin.get('discount_amount', 0))}"
+            table_rows.append([Paragraph(f"Discount ({disc_pct}%):", style_cell_right), "", "", "", Paragraph(disc_amt_str, style_cell_right)])
+            net_str = format_inr(fin.get("net_base", 0))
+            table_rows.append([Paragraph("Net Base:", style_cell_right), "", "", "", Paragraph(net_str, style_cell_right)])
+
+        cont_pct = fin.get("contingency_pct", "10")
+        cont_amt_str = format_inr(fin.get("contingency_amount", 0))
+        table_rows.append([Paragraph(f"Contingency Buffer ({cont_pct}%):", style_cell_right), "", "", "", Paragraph(cont_amt_str, style_cell_right)])
+
+        tax_pct = Decimal(str(fin.get("tax_pct", "0")))
+        if tax_pct > Decimal("0"):
+            tax_amt_str = format_inr(fin.get("tax_amount", 0))
+            table_rows.append([Paragraph(f"GST / Tax ({tax_pct}%):", style_cell_right), "", "", "", Paragraph(tax_amt_str, style_cell_right)])
+
+        grand_total_str = format_inr(fin.get("total_amount", 0))
+        table_rows.append([Paragraph("<b>TOTAL ESTIMATE:</b>", style_cell_right_bold), "", "", "", Paragraph(f"<b>{grand_total_str}</b>", style_cell_right_bold)])
+
+        totals_end_row = len(table_rows) - 1
+
+        item_table = Table(table_rows, colWidths=[8 * mm, 80 * mm, 40 * mm, 18 * mm, 34 * mm])
+        t_styles = [
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2B6CB0")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("GRID", (0, 0), (-1, len(line_items)), 0.5, colors.HexColor("#CBD5E0")),
+            ("TOPPADDING", (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("LINEBELOW", (0, 0), (-1, 0), 1.5, colors.HexColor("#1A365D")),
+            ("BACKGROUND", (0, totals_end_row), (-1, totals_end_row), colors.HexColor("#EBF8FF")),
+            ("BOX", (0, totals_end_row), (-1, totals_end_row), 1, colors.HexColor("#2B6CB0")),
+        ]
+        for r in range(totals_start_row, totals_end_row + 1):
+            t_styles.append(("SPAN", (0, r), (3, r)))
+            t_styles.append(("ALIGN", (0, r), (3, r), "RIGHT"))
+
+        item_table.setStyle(TableStyle(t_styles))
+        story.append(item_table)
+        story.append(Spacer(1, 4 * mm))
+
+        min_est = format_inr(fin.get("min_estimate", 0))
+        max_est = format_inr(fin.get("max_estimate", 0))
+        range_pct = fin.get("estimate_range_pct", "10")
+
+        range_text = (
+            f"<b>Expected Cost Range (+/-{range_pct}%): {min_est} to {max_est}</b><br/>"
+            f"<i>(Accounts for minor variations in consumable utilization, diagnostics, or clinical course)</i>"
         )
-    )
-    story.append(range_box)
-    story.append(Spacer(1, 5 * mm))
+        range_box = Table(
+            [[Paragraph(range_text, style_cell)]],
+            colWidths=[180 * mm],
+        )
+        range_box.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#FEFCBF")),
+                    ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#D69E2E")),
+                    ("TOPPADDING", (0, 0), (-1, -1), 5),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 8),
+                ]
+            )
+        )
+        story.append(range_box)
+        story.append(Spacer(1, 5 * mm))
 
     # 6. Disclaimer & Legal Notice
     disclaimer_block = [
