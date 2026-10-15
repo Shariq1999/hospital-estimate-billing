@@ -141,6 +141,17 @@ class EstimateResult:
     surgeon_fee_amount: Decimal = Decimal("0.00")
     comparative_estimates: List[Dict[str, Any]] = field(default_factory=list)
 
+    def __getattr__(self, name: str) -> Any:
+        if name == "comparative_estimates":
+            return []
+        if name == "surgeon_fee_type":
+            return "fixed"
+        if name == "surgeon_fee_amount":
+            return Decimal("0.00")
+        if name in ("mobile_number", "uhid"):
+            return ""
+        raise AttributeError(f"'EstimateResult' object has no attribute '{name}'")
+
     def to_snapshot_dict(self) -> Dict[str, Any]:
         """Produce the comprehensive immutable snapshot dictionary."""
         return {
@@ -159,15 +170,15 @@ class EstimateResult:
                 "name": self.patient_name,
                 "remarks": self.remarks,
                 "stay_days": self.stay_days,
-                "mobile_number": self.mobile_number,
-                "uhid": self.uhid,
+                "mobile_number": getattr(self, "mobile_number", ""),
+                "uhid": getattr(self, "uhid", ""),
             },
             "clinical": {
                 "department": self.department_name,
                 "doctor": self.doctor_name,
                 "surgeon_fee_pct": str(self.doctor_fee_pct),
-                "surgeon_fee_type": self.surgeon_fee_type,
-                "surgeon_fee_amount": str(self.surgeon_fee_amount),
+                "surgeon_fee_type": getattr(self, "surgeon_fee_type", "fixed"),
+                "surgeon_fee_amount": str(getattr(self, "surgeon_fee_amount", Decimal("0.00"))),
                 "procedure": self.procedure_name,
                 "room_type": self.room_type_name,
                 "room_daily_rate": str(self.room_daily_rate),
@@ -188,7 +199,7 @@ class EstimateResult:
                 "max_estimate": str(self.max_estimate),
             },
             "line_items": [item.to_dict() for item in self.line_items],
-            "comparative_estimates": self.comparative_estimates,
+            "comparative_estimates": getattr(self, "comparative_estimates", []),
         }
 
 
@@ -275,6 +286,7 @@ def calculate_estimate(
     surgeon_fee_type: Optional[str] = None,
     surgeon_fee_amount: Optional[Any] = None,
     comparative_rooms: Optional[List[Dict[str, Any]]] = None,
+    **kwargs: Any,
 ) -> EstimateResult:
     """
     Pure calculation function producing an EstimateResult.
@@ -284,6 +296,15 @@ def calculate_estimate(
     - Tax applies to post-discount net of taxable lines (consumables, investigations)
     - Min/Max range band is computed as total_amount +/- estimate_range_pct
     """
+    if surgeon_fee_type is None and "surgeon_fee_type" in kwargs:
+        surgeon_fee_type = kwargs["surgeon_fee_type"]
+    if surgeon_fee_amount is None and "surgeon_fee_amount" in kwargs:
+        surgeon_fee_amount = kwargs["surgeon_fee_amount"]
+    if comparative_rooms is None and "comparative_rooms" in kwargs:
+        comparative_rooms = kwargs["comparative_rooms"]
+    elif comparative_rooms is None and "comparative_room" in kwargs and kwargs["comparative_room"]:
+        comparative_rooms = [kwargs["comparative_room"]]
+
     if settings is None:
         settings = {}
 

@@ -353,3 +353,84 @@ def test_zero_emojis_and_zero_em_dashes_in_codebase():
         # 2. Check for emojis (characters in unicode emoji ranges or pictographs)
         emojis = [c for c in content if ord(c) >= 0x1F300 or (ord(c) > 127 and c not in "₹±")]
         assert len(emojis) == 0, f"{fn} contains {len(emojis)} emoji characters: {set(emojis)}"
+
+
+def test_backward_compatible_estimate_result_attributes():
+    """Verify that older EstimateResult objects without new attributes don't raise AttributeError."""
+    proc = {
+        "id": 1,
+        "name": "General Surgery",
+        "base_cost": 50000,
+        "ot_charge": 10000,
+        "anaesthesia_charge": 5000,
+        "consumables_cost": 5000,
+        "investigations_charge": 2000,
+    }
+    room = {"id": 1, "name": "General Ward", "daily_rate": 2000}
+    dept = {"id": 1, "name": "General Surgery"}
+    doctor = {"id": 1, "name": "Dr. Smith", "consultation_fee": 1000, "surgeon_fee_pct": 20}
+
+    res = billing.calculate_estimate(
+        patient_name="Old Patient",
+        stay_days=2,
+        room_type=room,
+        doctor=doctor,
+        procedure=proc,
+        department=dept,
+    )
+
+    # Delete attributes to simulate a session state object from an older deployment
+    for attr in ("comparative_estimates", "surgeon_fee_type", "surgeon_fee_amount", "mobile_number", "uhid"):
+        if attr in res.__dict__:
+            del res.__dict__[attr]
+
+    # Must safely fallback via __getattr__
+    assert res.comparative_estimates == []
+    assert res.surgeon_fee_type == "fixed"
+    assert res.surgeon_fee_amount == Decimal("0.00")
+    assert res.mobile_number == ""
+    assert res.uhid == ""
+
+    # Snapshot dict must succeed without error
+    snapshot = res.to_snapshot_dict()
+    assert snapshot["comparative_estimates"] == []
+    assert snapshot["patient"]["mobile_number"] == ""
+
+    # PDF generation must succeed without error
+    pdf_bytes = pdf_generator.generate_estimate_pdf(res, is_draft=True)
+    assert len(pdf_bytes) > 1000
+
+
+def test_calculate_estimate_resilient_to_unexpected_kwargs():
+    """Verify calculate_estimate gracefully accepts unexpected kwargs without raising TypeError."""
+    proc = {
+        "id": 1,
+        "name": "General Surgery",
+        "base_cost": 50000,
+        "ot_charge": 10000,
+        "anaesthesia_charge": 5000,
+        "consumables_cost": 5000,
+        "investigations_charge": 2000,
+    }
+    room = {"id": 1, "name": "General Ward", "daily_rate": 2000}
+    dept = {"id": 1, "name": "General Surgery"}
+    doctor = {"id": 1, "name": "Dr. Smith", "consultation_fee": 1000, "surgeon_fee_pct": 20}
+
+    # Pass arbitrary kwargs and legacy comparative_room argument
+    res = billing.calculate_estimate(
+        patient_name="Resilience Test",
+        stay_days=2,
+        room_type=room,
+        doctor=doctor,
+        procedure=proc,
+        department=dept,
+        surgeon_fee_type="fixed",
+        surgeon_fee_amount=15000,
+        comparative_room={"name": "Deluxe", "daily_rate": 6000},
+        legacy_arg="ignored_safely",
+        future_flag=True,
+    )
+    assert res.patient_name == "Resilience Test"
+    assert len(res.comparative_estimates) == 1
+    assert res.comparative_estimates[0]["clinical"]["room_type"] == "Deluxe"
+

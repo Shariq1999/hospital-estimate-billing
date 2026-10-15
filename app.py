@@ -19,10 +19,22 @@ from typing import Dict, Optional
 import pandas as pd
 import streamlit as st
 
+import importlib
 import billing
 import database
 import pdf_generator
 import seed_data
+
+# Ensure modules stay synchronized in persistent server workers (e.g. Streamlit Cloud)
+try:
+    if "surgeon_fee_type" not in getattr(billing.calculate_estimate, "__code__", object()).co_varnames:
+        billing = importlib.reload(billing)
+    if "surgeon_fee_type" not in getattr(database.save_doctor, "__code__", object()).co_varnames:
+        database = importlib.reload(database)
+    if "comparative_estimates" not in getattr(billing.EstimateResult, "__annotations__", {}):
+        billing = importlib.reload(billing)
+except Exception:
+    pass
 
 
 def format_history_timestamp(ts: Optional[str]) -> str:
@@ -529,9 +541,20 @@ try:
                             st.session_state["inputs_dirty"] = False
                             st.session_state["inline_editing"] = False
 
-                # Render Estimate Breakdown
                 active_est = st.session_state.get("active_estimate")
                 if active_est:
+                    # Backward compatibility for estimates in session state prior to code reload
+                    if not hasattr(active_est, "comparative_estimates"):
+                        active_est.comparative_estimates = []
+                    if not hasattr(active_est, "surgeon_fee_type"):
+                        active_est.surgeon_fee_type = "fixed"
+                    if not hasattr(active_est, "surgeon_fee_amount"):
+                        active_est.surgeon_fee_amount = Decimal("0.00")
+                    if not hasattr(active_est, "mobile_number"):
+                        active_est.mobile_number = ""
+                    if not hasattr(active_est, "uhid"):
+                        active_est.uhid = ""
+
                     st.divider()
 
                     if st.session_state.get("inputs_dirty"):
@@ -628,8 +651,8 @@ try:
                                         surgeon_fee_amount=edit_surg_fee,
                                         comparative_rooms=selected_comp_rooms if compare_rooms else None,
                                     )
-                                    recalculated.mobile_number = active_est.mobile_number
-                                    recalculated.uhid = active_est.uhid
+                                    recalculated.mobile_number = getattr(active_est, "mobile_number", "")
+                                    recalculated.uhid = getattr(active_est, "uhid", "")
                                     st.session_state["active_estimate"] = recalculated
                                     st.session_state["saved_estimate_number"] = None
                                     st.session_state["inline_editing"] = False
@@ -665,8 +688,8 @@ try:
                         "*(Accounts for potential variations in surgical supplies, length of stay, or medical management)*"
                     )
 
-                    # Table Rendering: Comparative vs Single-Room
-                    if active_est.comparative_estimates:
+                    comp_estimates = getattr(active_est, "comparative_estimates", [])
+                    if comp_estimates:
                         st.write("##### Primary and Comparative Room Categories Analysis")
                         rows_comp = []
                         for idx, item in enumerate(active_est.line_items):
@@ -675,7 +698,7 @@ try:
                                 "Description": item.description,
                                 f"{active_est.room_type_name} (Primary)": billing.format_inr(item.amount),
                             }
-                            for c in active_est.comparative_estimates:
+                            for c in comp_estimates:
                                 c_name = c.get("clinical", {}).get("room_type", "Comparative")
                                 c_items = c.get("line_items", [])
                                 if idx < len(c_items):
@@ -687,29 +710,29 @@ try:
 
                         # Summary rows
                         r_sub = {"Category": "SUBTOTAL", "Description": "Gross Itemized Charges", f"{active_est.room_type_name} (Primary)": billing.format_inr(active_est.subtotal)}
-                        for c in active_est.comparative_estimates:
+                        for c in comp_estimates:
                             r_sub[c.get("clinical", {}).get("room_type", "Comparative")] = billing.format_inr(c.get("financials", {}).get("subtotal", 0))
                         rows_comp.append(r_sub)
 
                         if active_est.discount_pct > Decimal("0"):
                             r_disc = {"Category": "DISCOUNT", "Description": f"{active_est.discount_pct}% special discount", f"{active_est.room_type_name} (Primary)": f"-{billing.format_inr(active_est.discount_amount)}"}
-                            for c in active_est.comparative_estimates:
+                            for c in comp_estimates:
                                 r_disc[c.get("clinical", {}).get("room_type", "Comparative")] = f"-{billing.format_inr(c.get('financials', {}).get('discount_amount', 0))}"
                             rows_comp.append(r_disc)
 
                         r_cont = {"Category": "CONTINGENCY BUFFER", "Description": f"{active_est.contingency_pct}% non-taxed buffer", f"{active_est.room_type_name} (Primary)": billing.format_inr(active_est.contingency_amount)}
-                        for c in active_est.comparative_estimates:
+                        for c in comp_estimates:
                             r_cont[c.get("clinical", {}).get("room_type", "Comparative")] = billing.format_inr(c.get("financials", {}).get("contingency_amount", 0))
                         rows_comp.append(r_cont)
 
                         if active_est.tax_pct > Decimal("0"):
                             r_tax = {"Category": "GST / TAX", "Description": f"{active_est.tax_pct}% tax", f"{active_est.room_type_name} (Primary)": billing.format_inr(active_est.tax_amount)}
-                            for c in active_est.comparative_estimates:
+                            for c in comp_estimates:
                                 r_tax[c.get("clinical", {}).get("room_type", "Comparative")] = billing.format_inr(c.get("financials", {}).get("tax_amount", 0))
                             rows_comp.append(r_tax)
 
                         r_tot = {"Category": "TOTAL ESTIMATE", "Description": "Total Estimated Cost", f"{active_est.room_type_name} (Primary)": billing.format_inr(active_est.total_amount)}
-                        for c in active_est.comparative_estimates:
+                        for c in comp_estimates:
                             r_tot[c.get("clinical", {}).get("room_type", "Comparative")] = billing.format_inr(c.get("financials", {}).get("total_amount", 0))
                         rows_comp.append(r_tot)
 
@@ -771,8 +794,8 @@ try:
                                 "line_items_json": snapshot,
                                 "remarks": active_est.remarks,
                                 "created_at": active_est.created_at,
-                                "mobile_number": active_est.mobile_number,
-                                "uhid": active_est.uhid,
+                                "mobile_number": getattr(active_est, "mobile_number", ""),
+                                "uhid": getattr(active_est, "uhid", ""),
                                 "revision_of": revision_of,
                             }
                             database.save_estimate(conn, save_data)
@@ -785,7 +808,7 @@ try:
                         pdf_bytes = pdf_generator.generate_estimate_pdf(active_est, is_draft=is_draft)
 
                         safe_name = re.sub(r'[^\w\-]', '_', active_est.patient_name.strip())[:30] or "Patient"
-                        safe_uhid = re.sub(r'[^\w\-]', '_', (active_est.uhid or "").strip() or "NoUHID")[:15]
+                        safe_uhid = re.sub(r'[^\w\-]', '_', (getattr(active_est, "uhid", "") or "").strip() or "NoUHID")[:15]
                         est_num_label = st.session_state.get('saved_estimate_number') or 'DRAFT'
                         file_label = f"{safe_name}_{safe_uhid}_{est_num_label}.pdf"
 
