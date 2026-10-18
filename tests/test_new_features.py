@@ -33,7 +33,7 @@ def feature_db():
     conn = database.get_connection(db_path)
     database.init_db(conn)
     seed_data.seed(conn)
-    database.set_admin_password(conn, "admin", "Admin@12345")
+    database.set_admin_password(conn, "admin", "Admin@1234")
     yield conn, db_path
     conn.close()
 
@@ -43,9 +43,11 @@ def feature_db():
 # ------------------------------------------------------------------------------
 def test_admin_and_staff_auth_credentials(feature_db):
     conn, _ = feature_db
-    assert database.verify_admin_credentials(conn, "admin", "Admin@12345") is True
+    assert database.verify_admin_credentials(conn, "admin", "Admin@1234") is True
     assert database.verify_admin_credentials(conn, "admin", "WrongPassword") is False
-    assert database.verify_admin_credentials(conn, "unknown", "Admin@12345") is False
+    assert database.verify_admin_credentials(conn, "unknown", "Admin@1234") is False
+    assert database.DEFAULT_ADMIN_USERNAME == "admin"
+    assert database.DEFAULT_ADMIN_PASSWORD == "Admin@1234"
 
 
 # ------------------------------------------------------------------------------

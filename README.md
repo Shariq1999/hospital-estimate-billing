@@ -165,9 +165,11 @@ streamlit run app.py
 Open your web browser at `http://localhost:8501`.
 
 ### 4. First-Time Initialization
-1. Upon first startup, the database schema is created in `hospital.db` in **WAL mode** and populated with initial tariffs. An internal `'seeded'` flag prevents re-seeding if tables are later cleared.
-2. Navigate to **⚙️ Admin Portal** in the sidebar.
-3. Complete the **First-Run Setup** form to create your administrator password.
+1. Upon first startup, the database schema is created in `hospital.db` in **WAL mode** and populated with initial tariffs.
+2. The system is initialized with a default administrator account:
+   - **Username:** `admin`
+   - **Password:** `Admin@1234`
+3. Use these credentials to log in to the **Staff Authentication** gate to generate estimates, or access the **Admin Portal** in the sidebar to configure master data or update the password.
 
 ---
 

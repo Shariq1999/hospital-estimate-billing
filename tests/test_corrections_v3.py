@@ -26,7 +26,7 @@ def clean_db(tmp_path):
     conn = database.get_connection(db_file)
     database.init_db(conn)
     seed_data.seed(conn)
-    database.set_admin_password(conn, "admin", "Admin@12345")
+    database.set_admin_password(conn, "admin", "Admin@1234")
     yield conn, db_file
     conn.close()
 
@@ -433,4 +433,24 @@ def test_calculate_estimate_resilient_to_unexpected_kwargs():
     assert res.patient_name == "Resilience Test"
     assert len(res.comparative_estimates) == 1
     assert res.comparative_estimates[0]["clinical"]["room_type"] == "Deluxe"
+
+
+def test_default_admin_account_credentials(tmp_path):
+    """Verify that ensure_default_admin creates admin with password Admin@1234."""
+    db_file = str(tmp_path / "test_default_admin.db")
+    conn = database.get_connection(db_file)
+    database.init_db(conn)
+
+    # Initially not configured
+    assert not database.is_admin_configured(conn)
+
+    # Ensure default admin
+    database.ensure_default_admin(conn)
+    assert database.is_admin_configured(conn)
+
+    # Verify credentials
+    assert database.verify_admin_credentials(conn, "admin", "Admin@1234") is True
+    assert database.verify_admin_credentials(conn, "admin", "Admin@12345") is False
+    assert database.verify_admin_credentials(conn, "admin", "WrongPassword") is False
+    conn.close()
 

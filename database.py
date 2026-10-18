@@ -212,11 +212,21 @@ def verify_password(password: str, salt: str, expected_hash: str) -> bool:
     return hmac.compare_digest(computed_hash, expected_hash)
 
 
+DEFAULT_ADMIN_USERNAME = "admin"
+DEFAULT_ADMIN_PASSWORD = "Admin@1234"
+
+
 def is_admin_configured(conn: sqlite3.Connection) -> bool:
     """Return True if at least one admin account exists in admin_auth."""
     cursor = conn.cursor()
     row = cursor.execute("SELECT COUNT(*) FROM admin_auth").fetchone()
     return bool(row and row[0] > 0)
+
+
+def ensure_default_admin(conn: sqlite3.Connection) -> None:
+    """Ensure default admin account exists if no admin account is configured."""
+    if not is_admin_configured(conn):
+        set_admin_password(conn, DEFAULT_ADMIN_USERNAME, DEFAULT_ADMIN_PASSWORD)
 
 
 def set_admin_password(conn: sqlite3.Connection, username: str, password: str) -> None:

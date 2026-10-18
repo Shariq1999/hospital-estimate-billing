@@ -9,15 +9,21 @@ IMPORTANT
 - Amounts are whole rupees (int). Convert to Decimal / paise in billing.py.
 - base_cost = hospital procedure charge EXCLUDING the surgeon's professional
   fee. The surgeon fee is computed as base_cost * surgeon_fee_pct / 100.
-- default_stay_days = 0 means day care (no room charge).
-- admin_password is intentionally NOT seeded. Set a hashed password on
-  first login.
+- Default administrator credentials: username admin, password Admin@1234.
 - Column names assume the revised schema. If your database.py differs,
   adapt the INSERT statements in seed().
 """
 
 import sqlite3
-from database import init_db, get_connection
+import database
+from database import (
+    ensure_default_admin,
+    get_connection,
+    init_db,
+)
+
+DEFAULT_ADMIN_USERNAME = database.DEFAULT_ADMIN_USERNAME
+DEFAULT_ADMIN_PASSWORD = database.DEFAULT_ADMIN_PASSWORD
 
 # ---------------------------------------------------------------- settings
 SETTINGS = {
@@ -132,11 +138,14 @@ PROCEDURES = [
 ]
 
 
-def seed(conn: sqlite3.Connection) -> None:
+def seed(conn: sqlite3.Connection, seed_admin: bool = False) -> None:
     """Insert seed rows. Safe to re-run: skips if seeded flag is set."""
     init_db(conn)
     cur = conn.cursor()
     cur.execute("PRAGMA foreign_keys = ON;")
+
+    if seed_admin:
+        ensure_default_admin(conn)
 
     row = cur.execute("SELECT value FROM settings WHERE key = 'seeded'").fetchone()
     if row and row[0] == "1":
@@ -214,6 +223,6 @@ if __name__ == "__main__":
 
     # Test actual seeding into hospital.db
     c = get_connection("hospital.db")
-    seed(c)
+    seed(c, seed_admin=True)
     print("Database hospital.db successfully seeded!")
     c.close()

@@ -61,11 +61,12 @@ DB_PATH = os.environ.get("HOSPITAL_DB_PATH", "hospital.db")
 
 @st.cache_resource
 def ensure_db_initialized(path: str = DB_PATH):
-    """Initialize database schema and seed data once (cached)."""
+    """Initialize database schema, seed data, and default admin credentials once (cached)."""
     init_conn = database.get_connection(path)
     try:
         database.init_db(init_conn)
         seed_data.seed(init_conn)
+        database.ensure_default_admin(init_conn)
     finally:
         init_conn.close()
 
