@@ -1,6 +1,7 @@
 """
 pdf_generator.py - Professional hospital estimate letterhead generator using ReportLab.
 Uses bundled Noto Sans TTF for full Unicode and Indian Rupee (₹) support.
+Supports customizable layout, branding, typography, margins, and visibility toggles via pdf_layout.
 """
 
 from __future__ import annotations
@@ -9,11 +10,11 @@ import io
 import os
 from decimal import Decimal
 from datetime import datetime, timedelta
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from xml.sax.saxutils import escape as xml_escape
 
 from reportlab.lib import colors
-from reportlab.lib.pagesizes import A4
+from reportlab.lib.pagesizes import A4, letter
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.pdfbase import pdfmetrics
@@ -29,6 +30,7 @@ from reportlab.platypus import (
 )
 
 from billing import EstimateResult, format_inr
+from pdf_layout import DEFAULT_PDF_LAYOUT, get_merged_layout
 
 
 # Register bundled Noto Sans Unicode fonts
@@ -49,19 +51,40 @@ pdfmetrics.registerFont(TTFont(FONT_NAME, REGULAR_FONT_PATH))
 pdfmetrics.registerFont(TTFont(BOLD_FONT_NAME, BOLD_FONT_PATH))
 
 
+def _parse_hex_color(val: Any, default: str) -> colors.Color:
+    """Safely parse hex color string into ReportLab HexColor."""
+    try:
+        s = str(val).strip()
+        if s.startswith("#") and len(s) in (4, 7, 9):
+            return colors.HexColor(s)
+    except Exception:
+        pass
+    return colors.HexColor(default)
+
+
 def generate_estimate_pdf(
     estimate_data: EstimateResult | Dict[str, Any],
     is_draft: bool = False,
+    layout_config: Optional[Dict[str, Any]] = None,
 ) -> bytes:
     """
     Generate a professional hospital estimate letterhead PDF as bytes.
-    If is_draft is True, stamps 'DRAFT - NOT SAVED' in the header.
+    If is_draft is True, stamps draft watermark in the header.
+    Incorporates customizable layout settings from layout_config, frozen snapshot, or DEFAULT_PDF_LAYOUT.
     """
     # Normalize input data
     if isinstance(estimate_data, EstimateResult):
         data = estimate_data.to_snapshot_dict()
     else:
         data = estimate_data
+
+    # Resolve layout configuration
+    if layout_config:
+        layout = get_merged_layout(layout_config)
+    elif isinstance(data, dict) and data.get("pdf_layout_snapshot"):
+        layout = get_merged_layout(data.get("pdf_layout_snapshot"))
+    else:
+        layout = dict(DEFAULT_PDF_LAYOUT)
 
     meta = data.get("metadata", {})
     est_num = meta.get("estimate_number") or ""
@@ -81,16 +104,27 @@ def generate_estimate_pdf(
         created_str = dt.strftime("%d-%b-%Y")
         valid_until_str = (dt + timedelta(days=validity_days)).strftime("%d-%b-%Y")
 
+    # Page setup and margins
+    page_size_name = layout.get("page_size", "A4").upper()
+    pagesize = letter if page_size_name == "LETTER" else A4
+
+    margin_top = float(layout.get("margin_top_mm", 15.0)) * mm
+    margin_bottom = float(layout.get("margin_bottom_mm", 15.0)) * mm
+    margin_left = float(layout.get("margin_left_mm", 15.0)) * mm
+    margin_right = float(layout.get("margin_right_mm", 15.0)) * mm
+
+    content_width = pagesize[0] - margin_left - margin_right
+
     buffer = io.BytesIO()
     doc_title = f"Hospital Cost Estimate - {'DRAFT - NOT SAVED' if is_draft or not est_num else est_num}"
     doc_subject = f"Estimate Date: {created_str} | Valid Until: {valid_until_str}"
     doc = SimpleDocTemplate(
         buffer,
-        pagesize=A4,
-        leftMargin=15 * mm,
-        rightMargin=15 * mm,
-        topMargin=15 * mm,
-        bottomMargin=15 * mm,
+        pagesize=pagesize,
+        leftMargin=margin_left,
+        rightMargin=margin_right,
+        topMargin=margin_top,
+        bottomMargin=margin_bottom,
         title=doc_title,
         subject=doc_subject,
     )
@@ -98,32 +132,49 @@ def generate_estimate_pdf(
     story: List[Any] = []
     styles = getSampleStyleSheet()
 
+    # Color resolution
+    primary_color = _parse_hex_color(layout.get("primary_color"), "#1A365D")
+    secondary_color = _parse_hex_color(layout.get("secondary_color"), "#2B6CB0")
+    table_header_bg = _parse_hex_color(layout.get("table_header_bg"), "#2B6CB0")
+    table_header_text_color = _parse_hex_color(layout.get("table_header_text_color"), "#FFFFFF")
+    table_border_color = _parse_hex_color(layout.get("table_border_color"), "#CBD5E0")
+    accent_color = _parse_hex_color(layout.get("accent_color"), "#EBF8FF")
+
+    title_fs = int(layout.get("title_font_size", 18))
+    body_fs = float(layout.get("body_font_size", 8.5))
+    table_fs = float(layout.get("table_font_size", 8.5))
+
+    align_map = {"LEFT": 0, "CENTER": 1, "RIGHT": 2}
+    h_align = align_map.get(layout.get("header_alignment", "LEFT").upper(), 0)
+
     # Custom typography styles
     style_h1 = ParagraphStyle(
         "HospitalName",
         parent=styles["Normal"],
         fontName=BOLD_FONT_NAME,
-        fontSize=18,
-        leading=22,
-        textColor=colors.HexColor("#1A365D"),  # Deep Navy
+        fontSize=title_fs,
+        leading=title_fs + 4,
+        textColor=primary_color,
+        alignment=h_align,
     )
 
     style_sub = ParagraphStyle(
         "HospitalSub",
         parent=styles["Normal"],
         fontName=FONT_NAME,
-        fontSize=8.5,
-        leading=12,
+        fontSize=body_fs,
+        leading=body_fs + 3.5,
         textColor=colors.HexColor("#4A5568"),
+        alignment=h_align,
     )
 
     style_title = ParagraphStyle(
         "DocTitle",
         parent=styles["Normal"],
         fontName=BOLD_FONT_NAME,
-        fontSize=13,
-        leading=16,
-        textColor=colors.HexColor("#2B6CB0"),
+        fontSize=max(11, title_fs - 5),
+        leading=max(14, title_fs - 2),
+        textColor=secondary_color,
         alignment=1,  # Center
     )
 
@@ -151,8 +202,8 @@ def generate_estimate_pdf(
         "CellNormal",
         parent=styles["Normal"],
         fontName=FONT_NAME,
-        fontSize=8.5,
-        leading=11,
+        fontSize=table_fs,
+        leading=table_fs + 2.5,
         textColor=colors.HexColor("#2D3748"),
     )
 
@@ -160,8 +211,8 @@ def generate_estimate_pdf(
         "CellBold",
         parent=styles["Normal"],
         fontName=BOLD_FONT_NAME,
-        fontSize=8.5,
-        leading=11,
+        fontSize=table_fs,
+        leading=table_fs + 2.5,
         textColor=colors.HexColor("#1A202C"),
     )
 
@@ -169,8 +220,8 @@ def generate_estimate_pdf(
         "CellRight",
         parent=styles["Normal"],
         fontName=FONT_NAME,
-        fontSize=8.5,
-        leading=11,
+        fontSize=table_fs,
+        leading=table_fs + 2.5,
         alignment=2,  # Right
         textColor=colors.HexColor("#2D3748"),
     )
@@ -179,8 +230,8 @@ def generate_estimate_pdf(
         "CellRightBold",
         parent=styles["Normal"],
         fontName=BOLD_FONT_NAME,
-        fontSize=8.5,
-        leading=11,
+        fontSize=table_fs,
+        leading=table_fs + 2.5,
         alignment=2,  # Right
         textColor=colors.HexColor("#1A202C"),
     )
@@ -199,45 +250,59 @@ def generate_estimate_pdf(
     fin = data.get("financials", {})
     line_items = data.get("line_items", [])
 
-    h_name = xml_escape(str(meta.get("hospital_name") or "Sample Multispeciality Hospital"))
-    h_addr = xml_escape(str(meta.get("hospital_address") or ""))
-    h_phone = xml_escape(str(meta.get("hospital_phone") or ""))
-    h_email = xml_escape(str(meta.get("hospital_email") or ""))
-    disclaimer = xml_escape(str(meta.get("disclaimer_text") or ""))
+    h_name = xml_escape(str(layout.get("hospital_name") or meta.get("hospital_name") or "Sample Multispeciality Hospital"))
+    h_sub = xml_escape(str(layout.get("hospital_subtitle") or ""))
+    h_addr = xml_escape(str(layout.get("hospital_address") or meta.get("hospital_address") or ""))
+    h_contact = xml_escape(str(layout.get("hospital_contact") or f"Tel: {meta.get('hospital_phone', '')} | Email: {meta.get('hospital_email', '')}"))
 
-    # 1. Header Section - Letterhead Placeholder
-    placeholder_box = Table(
-        [[Paragraph("[ HOSPITAL LETTERHEAD / LOGO PLACEHOLDER ]", style_letterhead_placeholder)]],
-        colWidths=[180 * mm],
-    )
-    placeholder_box.setStyle(
-        TableStyle(
-            [
-                ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F7FAFC")),
-                ("BOX", (0, 0), (-1, -1), 0.8, colors.HexColor("#CBD5E0")),
-                ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-                ("TOPPADDING", (0, 0), (-1, -1), 5),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-            ]
+    # 1. Header Section - Letterhead Placeholder (if toggled)
+    if layout.get("show_letterhead_placeholder", True):
+        placeholder_box = Table(
+            [[Paragraph("[ HOSPITAL LETTERHEAD / LOGO PLACEHOLDER ]", style_letterhead_placeholder)]],
+            colWidths=[content_width],
         )
-    )
-    story.append(placeholder_box)
-    story.append(Spacer(1, 4 * mm))
+        placeholder_box.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F7FAFC")),
+                    ("BOX", (0, 0), (-1, -1), 0.8, colors.HexColor("#CBD5E0")),
+                    ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                    ("TOPPADDING", (0, 0), (-1, -1), 5),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                ]
+            )
+        )
+        story.append(placeholder_box)
+        story.append(Spacer(1, 4 * mm))
+
+    # Header details table
+    header_w_left = content_width * 0.65
+    header_w_right = content_width * 0.35
+
+    date_block = f"<b>ESTIMATE DATE:</b> {created_str}"
+    if layout.get("show_validity_date", True):
+        date_block += f"<br/><b>VALID UNTIL:</b> {valid_until_str}"
+
+    sub_parts = []
+    if h_sub:
+        sub_parts.append(f"<i>{h_sub}</i>")
+    if h_addr:
+        sub_parts.append(h_addr)
+    if h_contact:
+        sub_parts.append(h_contact)
+    sub_text = "<br/>".join(sub_parts)
 
     header_data = [
         [
             Paragraph(f"<b>{h_name}</b>", style_h1),
-            Paragraph(
-                f"<b>ESTIMATE DATE:</b> {created_str}<br/><b>VALID UNTIL:</b> {valid_until_str}",
-                style_cell_right,
-            ),
+            Paragraph(date_block, style_cell_right),
         ],
         [
-            Paragraph(f"{h_addr}<br/>Tel: {h_phone} | Email: {h_email}", style_sub),
+            Paragraph(sub_text, style_sub),
             "",
         ],
     ]
-    header_table = Table(header_data, colWidths=[120 * mm, 60 * mm])
+    header_table = Table(header_data, colWidths=[header_w_left, header_w_right])
     header_table.setStyle(
         TableStyle(
             [
@@ -250,16 +315,19 @@ def generate_estimate_pdf(
     )
     story.append(header_table)
     story.append(Spacer(1, 3 * mm))
-    story.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor("#2B6CB0"), spaceAfter=8))
+    story.append(HRFlowable(width="100%", thickness=1.5, color=secondary_color, spaceAfter=8))
 
     # 2. Document Title / Draft Banner
+    proposal_title = xml_escape(str(layout.get("table_title_text") or "ESTIMATED HOSPITAL TARIFF & BILLING PROPOSAL"))
+    draft_watermark_text = xml_escape(str(layout.get("draft_watermark_text") or "*** DRAFT - NOT SAVED ***"))
+
     if is_draft or not est_num:
-        doc_header_text = "ESTIMATED HOSPITAL TARIFF & BILLING PROPOSAL"
-        draft_banner = Paragraph("<b>*** DRAFT - NOT SAVED ***</b>", style_draft_badge)
+        doc_header_text = proposal_title
+        draft_banner = Paragraph(f"<b>{draft_watermark_text}</b>", style_draft_badge)
         story.append(draft_banner)
         story.append(Spacer(1, 2 * mm))
     else:
-        doc_header_text = f"ESTIMATED HOSPITAL TARIFF & BILLING PROPOSAL - {est_num}"
+        doc_header_text = f"{proposal_title} - {est_num}"
 
     story.append(Paragraph(f"<b>{doc_header_text}</b>", style_title))
     story.append(Spacer(1, 4 * mm))
@@ -275,6 +343,12 @@ def generate_estimate_pdf(
     uhid_val = xml_escape(str(patient.get("uhid") or ""))
     mobile_val = xml_escape(str(patient.get("mobile_number") or ""))
 
+    show_doc = layout.get("show_attending_doctor", True)
+    doctor_display = doc_name if show_doc else "-"
+
+    stay_val = patient.get("stay_days", 0)
+    stay_str = f"{stay_val} Day{'s' if int(stay_val) != 1 else ''}{' (Day Care)' if int(stay_val) == 0 else ''}"
+
     patient_info = [
         [
             Paragraph("<b>Patient Name:</b>", style_cell_bold),
@@ -286,7 +360,7 @@ def generate_estimate_pdf(
             Paragraph("<b>Scheduled Procedure:</b>", style_cell_bold),
             Paragraph(proc_name, style_cell),
             Paragraph("<b>Primary Doctor/Surgeon:</b>", style_cell_bold),
-            Paragraph(doc_name, style_cell),
+            Paragraph(doctor_display, style_cell),
         ],
         [
             Paragraph("<b>Room Accommodation:</b>", style_cell_bold),
@@ -295,15 +369,12 @@ def generate_estimate_pdf(
                 style_cell,
             ),
             Paragraph("<b>Estimated Stay:</b>", style_cell_bold),
-            Paragraph(
-                f"{patient.get('stay_days', 0)} Day{'s' if int(patient.get('stay_days', 0)) != 1 else ''}"
-                f"{' (Day Care)' if int(patient.get('stay_days', 0)) == 0 else ''}",
-                style_cell,
-            ),
+            Paragraph(stay_str, style_cell),
         ],
     ]
-    # UHID and Mobile row (shown only when at least one is present)
-    if uhid_val or mobile_val:
+
+    # UHID and Mobile row (if toggled and at least one is present)
+    if layout.get("show_patient_uhid_mobile", True) and (uhid_val or mobile_val):
         patient_info.append(
             [
                 Paragraph("<b>UHID:</b>", style_cell_bold),
@@ -312,6 +383,7 @@ def generate_estimate_pdf(
                 Paragraph(mobile_val or "-", style_cell),
             ]
         )
+
     if remarks_val:
         patient_info.append(
             [
@@ -322,7 +394,12 @@ def generate_estimate_pdf(
             ]
         )
 
-    patient_table = Table(patient_info, colWidths=[38 * mm, 52 * mm, 40 * mm, 50 * mm])
+    w_col1 = content_width * 0.21
+    w_col2 = content_width * 0.29
+    w_col3 = content_width * 0.22
+    w_col4 = content_width - (w_col1 + w_col2 + w_col3)
+
+    patient_table = Table(patient_info, colWidths=[w_col1, w_col2, w_col3, w_col4])
     patient_table.setStyle(
         TableStyle(
             [
@@ -337,28 +414,36 @@ def generate_estimate_pdf(
             ]
         )
     )
-    # Span the remarks cell across columns 1-3 (last row)
     if remarks_val:
         remarks_row_idx = len(patient_info) - 1
         patient_table.setStyle(TableStyle([("SPAN", (1, remarks_row_idx), (3, remarks_row_idx))]))
     story.append(patient_table)
     story.append(Spacer(1, 5 * mm))
 
+    # Custom Column Headers
+    lbl_sno = xml_escape(str(layout.get("col_header_sno", "#")))
+    lbl_desc = xml_escape(str(layout.get("col_header_description", "Billing Item & Description")))
+    lbl_cat = xml_escape(str(layout.get("col_header_category", "Category")))
+    lbl_tax = xml_escape(str(layout.get("col_header_taxable", "Taxable")))
+    lbl_amt = xml_escape(str(layout.get("col_header_amount", "Amount (INR)")))
+
     # 4. Itemized Cost Table (Comparative or Single-Room)
     comp_estimates = data.get("comparative_estimates", [])
-    if comp_estimates:
+    render_comparative = comp_estimates and layout.get("show_room_upgrade_comparison", True)
+
+    if render_comparative:
         primary_room = xml_escape(str(clinical.get("room_type", "Primary Room")))
         num_comps = len(comp_estimates)
-        col_w = max(28.0, min(36.0, 96.0 / (num_comps + 1))) * mm
+        col_w = max(26.0 * mm, min(36.0 * mm, (content_width * 0.53) / (num_comps + 1)))
         idx_w = 7 * mm
         cat_w = 26 * mm
-        desc_w = 180 * mm - idx_w - cat_w - (col_w * (num_comps + 1))
+        desc_w = content_width - idx_w - cat_w - (col_w * (num_comps + 1))
         col_widths = [idx_w, desc_w, cat_w, col_w] + [col_w] * num_comps
 
         header_row = [
-            Paragraph("<b>#</b>", style_cell_bold),
-            Paragraph("<b>Billing Item & Description</b>", style_cell_bold),
-            Paragraph("<b>Category</b>", style_cell_bold),
+            Paragraph(f"<b>{lbl_sno}</b>", style_cell_bold),
+            Paragraph(f"<b>{lbl_desc}</b>", style_cell_bold),
+            Paragraph(f"<b>{lbl_cat}</b>", style_cell_bold),
             Paragraph(f"<b>{primary_room} (INR)</b>", style_cell_right_bold),
         ]
         for comp in comp_estimates:
@@ -396,9 +481,9 @@ def generate_estimate_pdf(
             sub_row.append(Paragraph(f"<b>{c_sub}</b>", style_cell_right_bold))
         table_rows.append(sub_row)
 
-        # Discount
+        # Discount (if toggled)
         disc_pct = Decimal(str(fin.get("discount_pct", "0")))
-        if disc_pct > Decimal("0"):
+        if layout.get("show_discount_row", True) and disc_pct > Decimal("0"):
             disc_row = [Paragraph(f"Discount ({disc_pct}%):", style_cell_right), "", ""]
             disc_row.append(Paragraph(f"-{format_inr(fin.get('discount_amount', 0))}", style_cell_right))
             for comp in comp_estimates:
@@ -413,18 +498,19 @@ def generate_estimate_pdf(
                 net_row.append(Paragraph(c_net, style_cell_right))
             table_rows.append(net_row)
 
-        # Contingency
-        cont_pct = fin.get("contingency_pct", "10")
-        cont_row = [Paragraph(f"Contingency Buffer ({cont_pct}%):", style_cell_right), "", ""]
-        cont_row.append(Paragraph(format_inr(fin.get("contingency_amount", 0)), style_cell_right))
-        for comp in comp_estimates:
-            c_cont = format_inr(comp.get("financials", {}).get("contingency_amount", 0))
-            cont_row.append(Paragraph(c_cont, style_cell_right))
-        table_rows.append(cont_row)
+        # Contingency (if toggled)
+        if layout.get("show_contingency_row", True):
+            cont_pct = fin.get("contingency_pct", "10")
+            cont_row = [Paragraph(f"Contingency Buffer ({cont_pct}%):", style_cell_right), "", ""]
+            cont_row.append(Paragraph(format_inr(fin.get("contingency_amount", 0)), style_cell_right))
+            for comp in comp_estimates:
+                c_cont = format_inr(comp.get("financials", {}).get("contingency_amount", 0))
+                cont_row.append(Paragraph(c_cont, style_cell_right))
+            table_rows.append(cont_row)
 
-        # Tax
+        # Tax (if toggled)
         tax_pct = Decimal(str(fin.get("tax_pct", "0")))
-        if tax_pct > Decimal("0"):
+        if layout.get("show_tax_row", True) and tax_pct > Decimal("0"):
             tax_row = [Paragraph(f"GST / Tax ({tax_pct}%):", style_cell_right), "", ""]
             tax_row.append(Paragraph(format_inr(fin.get("tax_amount", 0)), style_cell_right))
             for comp in comp_estimates:
@@ -444,15 +530,15 @@ def generate_estimate_pdf(
 
         item_table = Table(table_rows, colWidths=col_widths)
         t_styles = [
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2B6CB0")),
-            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-            ("GRID", (0, 0), (-1, len(line_items)), 0.5, colors.HexColor("#CBD5E0")),
+            ("BACKGROUND", (0, 0), (-1, 0), table_header_bg),
+            ("TEXTCOLOR", (0, 0), (-1, 0), table_header_text_color),
+            ("GRID", (0, 0), (-1, len(line_items)), 0.5, table_border_color),
             ("TOPPADDING", (0, 0), (-1, -1), 4),
             ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ("LINEBELOW", (0, 0), (-1, 0), 1.5, colors.HexColor("#1A365D")),
-            ("BACKGROUND", (0, totals_end_row), (-1, totals_end_row), colors.HexColor("#EBF8FF")),
-            ("BOX", (0, totals_end_row), (-1, totals_end_row), 1, colors.HexColor("#2B6CB0")),
+            ("LINEBELOW", (0, 0), (-1, 0), 1.5, primary_color),
+            ("BACKGROUND", (0, totals_end_row), (-1, totals_end_row), accent_color),
+            ("BOX", (0, totals_end_row), (-1, totals_end_row), 1, secondary_color),
         ]
         for r in range(totals_start_row, totals_end_row + 1):
             t_styles.append(("SPAN", (0, r), (2, r)))
@@ -462,40 +548,42 @@ def generate_estimate_pdf(
         story.append(item_table)
         story.append(Spacer(1, 4 * mm))
 
-        # Comparative Range Box
-        range_pct = fin.get("estimate_range_pct", "10")
-        range_lines = [f"<b>Expected Cost Ranges (+/-{range_pct}%):</b>"]
-        range_lines.append(f"- <b>{primary_room}:</b> {format_inr(fin.get('min_estimate', 0))} to {format_inr(fin.get('max_estimate', 0))}")
-        for comp in comp_estimates:
-            c_name = xml_escape(str(comp.get("clinical", {}).get("room_type", "Comparative Room")))
-            c_fin = comp.get("financials", {})
-            range_lines.append(f"- <b>{c_name}:</b> {format_inr(c_fin.get('min_estimate', 0))} to {format_inr(c_fin.get('max_estimate', 0))}")
-        range_lines.append("<i>(Accounts for minor variations in consumable utilization, diagnostics, or clinical course)</i>")
-        range_text = "<br/>".join(range_lines)
+        # Range Box (if toggled)
+        if layout.get("show_range_band_row", True):
+            range_pct = fin.get("estimate_range_pct", "10")
+            range_lines = [f"<b>Expected Cost Ranges (+/-{range_pct}%):</b>"]
+            range_lines.append(f"- <b>{primary_room}:</b> {format_inr(fin.get('min_estimate', 0))} to {format_inr(fin.get('max_estimate', 0))}")
+            for comp in comp_estimates:
+                c_name = xml_escape(str(comp.get("clinical", {}).get("room_type", "Comparative Room")))
+                c_fin = comp.get("financials", {})
+                range_lines.append(f"- <b>{c_name}:</b> {format_inr(c_fin.get('min_estimate', 0))} to {format_inr(c_fin.get('max_estimate', 0))}")
+            range_lines.append("<i>(Accounts for minor variations in consumable utilization, diagnostics, or clinical course)</i>")
+            range_text = "<br/>".join(range_lines)
 
-        range_box = Table([[Paragraph(range_text, style_cell)]], colWidths=[180 * mm])
-        range_box.setStyle(
-            TableStyle(
-                [
-                    ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#FEFCBF")),
-                    ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#D69E2E")),
-                    ("TOPPADDING", (0, 0), (-1, -1), 5),
-                    ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-                    ("LEFTPADDING", (0, 0), (-1, -1), 8),
-                ]
+            range_box = Table([[Paragraph(range_text, style_cell)]], colWidths=[content_width])
+            range_box.setStyle(
+                TableStyle(
+                    [
+                        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#FEFCBF")),
+                        ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#D69E2E")),
+                        ("TOPPADDING", (0, 0), (-1, -1), 5),
+                        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+                    ]
+                )
             )
-        )
-        story.append(range_box)
-        story.append(Spacer(1, 5 * mm))
+            story.append(range_box)
+            story.append(Spacer(1, 5 * mm))
 
     else:
+        # Single Room Table
         table_rows = [
             [
-                Paragraph("<b>#</b>", style_cell_bold),
-                Paragraph("<b>Billing Item & Description</b>", style_cell_bold),
-                Paragraph("<b>Category</b>", style_cell_bold),
-                Paragraph("<b>Taxable</b>", style_cell_bold),
-                Paragraph("<b>Amount (INR)</b>", style_cell_right_bold),
+                Paragraph(f"<b>{lbl_sno}</b>", style_cell_bold),
+                Paragraph(f"<b>{lbl_desc}</b>", style_cell_bold),
+                Paragraph(f"<b>{lbl_cat}</b>", style_cell_bold),
+                Paragraph(f"<b>{lbl_tax}</b>", style_cell_bold),
+                Paragraph(f"<b>{lbl_amt}</b>", style_cell_right_bold),
             ]
         ]
 
@@ -520,18 +608,19 @@ def generate_estimate_pdf(
         table_rows.append([Paragraph("<b>Subtotal:</b>", style_cell_right_bold), "", "", "", Paragraph(f"<b>{subtotal_str}</b>", style_cell_right_bold)])
 
         disc_pct = Decimal(str(fin.get("discount_pct", "0")))
-        if disc_pct > Decimal("0"):
+        if layout.get("show_discount_row", True) and disc_pct > Decimal("0"):
             disc_amt_str = f"-{format_inr(fin.get('discount_amount', 0))}"
             table_rows.append([Paragraph(f"Discount ({disc_pct}%):", style_cell_right), "", "", "", Paragraph(disc_amt_str, style_cell_right)])
             net_str = format_inr(fin.get("net_base", 0))
             table_rows.append([Paragraph("Net Base:", style_cell_right), "", "", "", Paragraph(net_str, style_cell_right)])
 
-        cont_pct = fin.get("contingency_pct", "10")
-        cont_amt_str = format_inr(fin.get("contingency_amount", 0))
-        table_rows.append([Paragraph(f"Contingency Buffer ({cont_pct}%):", style_cell_right), "", "", "", Paragraph(cont_amt_str, style_cell_right)])
+        if layout.get("show_contingency_row", True):
+            cont_pct = fin.get("contingency_pct", "10")
+            cont_amt_str = format_inr(fin.get("contingency_amount", 0))
+            table_rows.append([Paragraph(f"Contingency Buffer ({cont_pct}%):", style_cell_right), "", "", "", Paragraph(cont_amt_str, style_cell_right)])
 
         tax_pct = Decimal(str(fin.get("tax_pct", "0")))
-        if tax_pct > Decimal("0"):
+        if layout.get("show_tax_row", True) and tax_pct > Decimal("0"):
             tax_amt_str = format_inr(fin.get("tax_amount", 0))
             table_rows.append([Paragraph(f"GST / Tax ({tax_pct}%):", style_cell_right), "", "", "", Paragraph(tax_amt_str, style_cell_right)])
 
@@ -540,17 +629,23 @@ def generate_estimate_pdf(
 
         totals_end_row = len(table_rows) - 1
 
-        item_table = Table(table_rows, colWidths=[8 * mm, 80 * mm, 40 * mm, 18 * mm, 34 * mm])
+        w_idx = 8 * mm
+        w_cat = 38 * mm
+        w_tax = 16 * mm
+        w_amt = 32 * mm
+        w_desc = content_width - (w_idx + w_cat + w_tax + w_amt)
+
+        item_table = Table(table_rows, colWidths=[w_idx, w_desc, w_cat, w_tax, w_amt])
         t_styles = [
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2B6CB0")),
-            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-            ("GRID", (0, 0), (-1, len(line_items)), 0.5, colors.HexColor("#CBD5E0")),
+            ("BACKGROUND", (0, 0), (-1, 0), table_header_bg),
+            ("TEXTCOLOR", (0, 0), (-1, 0), table_header_text_color),
+            ("GRID", (0, 0), (-1, len(line_items)), 0.5, table_border_color),
             ("TOPPADDING", (0, 0), (-1, -1), 4),
             ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ("LINEBELOW", (0, 0), (-1, 0), 1.5, colors.HexColor("#1A365D")),
-            ("BACKGROUND", (0, totals_end_row), (-1, totals_end_row), colors.HexColor("#EBF8FF")),
-            ("BOX", (0, totals_end_row), (-1, totals_end_row), 1, colors.HexColor("#2B6CB0")),
+            ("LINEBELOW", (0, 0), (-1, 0), 1.5, primary_color),
+            ("BACKGROUND", (0, totals_end_row), (-1, totals_end_row), accent_color),
+            ("BOX", (0, totals_end_row), (-1, totals_end_row), 1, secondary_color),
         ]
         for r in range(totals_start_row, totals_end_row + 1):
             t_styles.append(("SPAN", (0, r), (3, r)))
@@ -560,66 +655,88 @@ def generate_estimate_pdf(
         story.append(item_table)
         story.append(Spacer(1, 4 * mm))
 
-        min_est = format_inr(fin.get("min_estimate", 0))
-        max_est = format_inr(fin.get("max_estimate", 0))
-        range_pct = fin.get("estimate_range_pct", "10")
+        if layout.get("show_range_band_row", True):
+            min_est = format_inr(fin.get("min_estimate", 0))
+            max_est = format_inr(fin.get("max_estimate", 0))
+            range_pct = fin.get("estimate_range_pct", "10")
 
-        range_text = (
-            f"<b>Expected Cost Range (+/-{range_pct}%): {min_est} to {max_est}</b><br/>"
-            f"<i>(Accounts for minor variations in consumable utilization, diagnostics, or clinical course)</i>"
+            range_text = (
+                f"<b>Expected Cost Range (+/-{range_pct}%): {min_est} to {max_est}</b><br/>"
+                f"<i>(Accounts for minor variations in consumable utilization, diagnostics, or clinical course)</i>"
+            )
+            range_box = Table(
+                [[Paragraph(range_text, style_cell)]],
+                colWidths=[content_width],
+            )
+            range_box.setStyle(
+                TableStyle(
+                    [
+                        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#FEFCBF")),
+                        ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#D69E2E")),
+                        ("TOPPADDING", (0, 0), (-1, -1), 5),
+                        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+                    ]
+                )
+            )
+            story.append(range_box)
+            story.append(Spacer(1, 5 * mm))
+
+    # 5. Disclaimer & Legal Notice
+    disclaimer_heading = xml_escape(str(layout.get("disclaimer_heading") or "IMPORTANT TERMS & CONDITIONS:"))
+    disclaimers_raw = str(layout.get("disclaimers_text") or meta.get("disclaimer_text") or "").strip()
+
+    disclaimer_lines = [
+        Paragraph(f"<b>{disclaimer_heading}</b>", style_cell_bold),
+        Spacer(1, 1 * mm),
+    ]
+
+    if disclaimers_raw:
+        for line in disclaimers_raw.split("\n"):
+            line_str = line.strip()
+            if line_str:
+                disclaimer_lines.append(Paragraph(xml_escape(line_str), style_disclaimer))
+    else:
+        disclaimer_lines.append(
+            Paragraph(
+                f"1. This estimate remains valid for <b>{validity_days} days</b> from {created_str}.<br/>"
+                "2. Admission is subject to bed availability in the requested category.<br/>"
+                "3. High-risk cases, unanticipated ICU stay, blood components, or non-formulary medications will be charged on actuals.",
+                style_disclaimer,
+            )
         )
-        range_box = Table(
-            [[Paragraph(range_text, style_cell)]],
-            colWidths=[180 * mm],
-        )
-        range_box.setStyle(
+
+    story.append(KeepTogether(disclaimer_lines))
+    story.append(Spacer(1, 8 * mm))
+
+    # 6. Signature Block (if toggled)
+    if layout.get("show_signature_block", True):
+        left_title = xml_escape(str(layout.get("left_signatory_title") or "Prepared by: Billing Desk"))
+        left_dept = xml_escape(str(layout.get("left_signatory_dept") or "Billing Desk"))
+        right_title = xml_escape(str(layout.get("right_signatory_title") or "Authorized Hospital Signatory"))
+        right_dept = xml_escape(str(layout.get("right_signatory_dept") or "(Patient Billing & Tariffs)"))
+
+        sig_left = f"{left_title}<br/><i>{left_dept}</i>" if left_dept else left_title
+        sig_right = f"{right_title}<br/><i>{right_dept}</i>" if right_dept else right_title
+
+        sig_w = content_width / 2.0
+        sig_data = [
+            [
+                Paragraph(sig_left, style_cell),
+                Paragraph(sig_right, style_cell_right),
+            ]
+        ]
+        sig_table = Table(sig_data, colWidths=[sig_w, sig_w])
+        sig_table.setStyle(
             TableStyle(
                 [
-                    ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#FEFCBF")),
-                    ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#D69E2E")),
-                    ("TOPPADDING", (0, 0), (-1, -1), 5),
-                    ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-                    ("LEFTPADDING", (0, 0), (-1, -1), 8),
+                    ("LINEABOVE", (0, 0), (0, 0), 0.5, colors.HexColor("#718096")),
+                    ("LINEABOVE", (1, 0), (1, 0), 0.5, colors.HexColor("#718096")),
+                    ("TOPPADDING", (0, 0), (-1, -1), 4),
                 ]
             )
         )
-        story.append(range_box)
-        story.append(Spacer(1, 5 * mm))
-
-    # 6. Disclaimer & Legal Notice
-    disclaimer_block = [
-        Paragraph("<b>IMPORTANT TERMS & CONDITIONS:</b>", style_cell_bold),
-        Spacer(1, 1 * mm),
-        Paragraph(disclaimer, style_disclaimer),
-        Spacer(1, 2 * mm),
-        Paragraph(
-            f"1. This estimate remains valid for <b>{validity_days} days</b> from {created_str}.<br/>"
-            "2. Admission is subject to bed availability in the requested category.<br/>"
-            "3. High-risk cases, unanticipated ICU stay, blood components, or non-formulary medications will be charged on actuals.",
-            style_disclaimer,
-        ),
-    ]
-    story.append(KeepTogether(disclaimer_block))
-    story.append(Spacer(1, 8 * mm))
-
-    # 7. Signature Block
-    sig_data = [
-        [
-            Paragraph("Prepared by: Billing Desk", style_cell),
-            Paragraph("Authorized Hospital Signatory<br/>(Patient Billing & Tariffs)", style_cell_right),
-        ]
-    ]
-    sig_table = Table(sig_data, colWidths=[90 * mm, 90 * mm])
-    sig_table.setStyle(
-        TableStyle(
-            [
-                ("LINEABOVE", (0, 0), (0, 0), 0.5, colors.HexColor("#718096")),
-                ("LINEABOVE", (1, 0), (1, 0), 0.5, colors.HexColor("#718096")),
-                ("TOPPADDING", (0, 0), (-1, -1), 4),
-            ]
-        )
-    )
-    story.append(KeepTogether(sig_table))
+        story.append(KeepTogether(sig_table))
 
     # Build PDF
     doc.build(story)

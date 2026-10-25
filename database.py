@@ -147,6 +147,15 @@ def init_db(conn: sqlite3.Connection) -> None:
         conn.execute(
             "INSERT OR IGNORE INTO counters (name, current_val) VALUES ('estimate', 0);"
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pdf_layout_config (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                config_json TEXT NOT NULL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """
+        )
         # Additive column migrations (safe on existing databases)
         _add_column_if_missing(conn, "estimates", "mobile_number", "TEXT DEFAULT ''")
         _add_column_if_missing(conn, "estimates", "uhid", "TEXT DEFAULT ''")
@@ -559,6 +568,51 @@ def update_settings(conn: sqlite3.Connection, settings_dict: Dict[str, str]) -> 
 
 
 # ==============================================================================
+# PDF Layout Configuration Management
+# ==============================================================================
+
+def get_pdf_layout(conn: sqlite3.Connection) -> Dict[str, Any]:
+    """Retrieve PDF layout config, merging stored JSON over DEFAULT_PDF_LAYOUT."""
+    from pdf_layout import DEFAULT_PDF_LAYOUT
+    try:
+        row = conn.execute("SELECT config_json FROM pdf_layout_config WHERE id = 1").fetchone()
+        if row and row["config_json"]:
+            saved = json.loads(row["config_json"])
+            merged = dict(DEFAULT_PDF_LAYOUT)
+            merged.update(saved)
+            return merged
+        else:
+            save_pdf_layout(conn, DEFAULT_PDF_LAYOUT)
+            return dict(DEFAULT_PDF_LAYOUT)
+    except Exception:
+        return dict(DEFAULT_PDF_LAYOUT)
+
+
+def save_pdf_layout(conn: sqlite3.Connection, config: Dict[str, Any]) -> None:
+    """Save or update PDF layout config (singleton id=1)."""
+    now = datetime.now().isoformat()
+    config_json = json.dumps(config)
+    with conn:
+        conn.execute(
+            """
+            INSERT INTO pdf_layout_config (id, config_json, updated_at)
+            VALUES (1, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                config_json = excluded.config_json,
+                updated_at = excluded.updated_at
+            """,
+            (config_json, now),
+        )
+
+
+def reset_pdf_layout(conn: sqlite3.Connection) -> Dict[str, Any]:
+    """Reset PDF layout config to factory defaults."""
+    from pdf_layout import DEFAULT_PDF_LAYOUT
+    save_pdf_layout(conn, DEFAULT_PDF_LAYOUT)
+    return dict(DEFAULT_PDF_LAYOUT)
+
+
+# ==============================================================================
 # Estimates & Snapshot Persistence
 # ==============================================================================
 
@@ -566,11 +620,32 @@ def save_estimate(conn: sqlite3.Connection, est: Dict[str, Any]) -> str:
     """Save an estimate along with its frozen JSON snapshot."""
     estimate_number = est["estimate_number"]
     now = datetime.now().isoformat()
-    line_items_json = (
-        est["line_items_json"]
-        if isinstance(est["line_items_json"], str)
-        else json.dumps(est["line_items_json"])
-    )
+
+    # Embed frozen layout snapshot into line_items_json if not present
+    raw_line_items = est["line_items_json"]
+    if isinstance(raw_line_items, dict):
+        snapshot_dict = dict(raw_line_items)
+        if "pdf_layout_snapshot" not in snapshot_dict:
+            try:
+                snapshot_dict["pdf_layout_snapshot"] = get_pdf_layout(conn)
+            except Exception:
+                pass
+        line_items_json = json.dumps(snapshot_dict)
+    elif isinstance(raw_line_items, str):
+        try:
+            parsed = json.loads(raw_line_items)
+            if isinstance(parsed, dict) and "pdf_layout_snapshot" not in parsed:
+                try:
+                    parsed["pdf_layout_snapshot"] = get_pdf_layout(conn)
+                    line_items_json = json.dumps(parsed)
+                except Exception:
+                    line_items_json = raw_line_items
+            else:
+                line_items_json = raw_line_items
+        except Exception:
+            line_items_json = raw_line_items
+    else:
+        line_items_json = json.dumps(raw_line_items)
 
     with conn:
         conn.execute(

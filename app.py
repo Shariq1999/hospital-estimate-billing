@@ -66,7 +66,8 @@ def ensure_db_initialized(path: str = DB_PATH):
     try:
         database.init_db(init_conn)
         seed_data.seed(init_conn)
-        database.ensure_default_admin(init_conn)
+        if "HOSPITAL_DB_PATH" not in os.environ:
+            database.ensure_default_admin(init_conn)
     finally:
         init_conn.close()
 
@@ -806,7 +807,7 @@ try:
 
                     with btn_col2:
                         is_draft = st.session_state.get("saved_estimate_number") is None
-                        pdf_bytes = pdf_generator.generate_estimate_pdf(active_est, is_draft=is_draft)
+                        pdf_bytes = pdf_generator.generate_estimate_pdf(active_est, is_draft=is_draft, layout_config=database.get_pdf_layout(conn))
 
                         safe_name = re.sub(r'[^\w\-]', '_', active_est.patient_name.strip())[:30] or "Patient"
                         safe_uhid = re.sub(r'[^\w\-]', '_', (getattr(active_est, "uhid", "") or "").strip() or "NoUHID")[:15]
@@ -1053,126 +1054,8 @@ try:
     # VIEW 3: DASHBOARD & EXCEL LEDGER
     # ==========================================================================
     elif navigation_option == "Dashboard":
-        st.header("Estimates Performance Dashboard & Analytics")
-        st.caption("Overview of estimates issued, patient conversion rates, forecasting accuracy, and complete ledger export.")
-
-        all_estimates = database.get_estimates(conn, limit=None)
-
-        if not all_estimates:
-            st.info("No estimates generated yet. Estimates saved in the Generator will appear here.")
-        else:
-            total_est_count = len(all_estimates)
-            total_est_value = sum(Decimal(str(e["total_amount"])) for e in all_estimates)
-            converted_list = [e for e in all_estimates if e.get("converted") == 1]
-            converted_count = len(converted_list)
-            conv_rate = (converted_count / total_est_count * 100.0) if total_est_count > 0 else 0.0
-            avg_est_value = total_est_value / Decimal(total_est_count) if total_est_count > 0 else Decimal(0)
-
-            accuracy_samples = []
-            for e in all_estimates:
-                act = e.get("actual_amount")
-                if act:
-                    acc = billing.calculate_accuracy(e["total_amount"], act)
-                    if acc is not None:
-                        accuracy_samples.append(acc)
-
-            avg_acc = (sum(accuracy_samples) / len(accuracy_samples)) if accuracy_samples else None
-
-            # 1. KPI Metric Row
-            k1, k2, k3, k4, k5 = st.columns(5)
-            k1.metric("Total Estimates", str(total_est_count))
-            k2.metric("Total Estimated Value", billing.format_inr(total_est_value, whole_rupees=True))
-            k3.metric("Patient Conversion", f"{converted_count} ({conv_rate:.1f}%)", help="Percentage of estimates where patient accepted treatment")
-            k4.metric("Average Estimate", billing.format_inr(avg_est_value, whole_rupees=True))
-            if avg_acc is not None:
-                k5.metric("Avg Variance (Accuracy)", f"{avg_acc:.2f}%", help="|Actual - Estimated| / Actual * 100% across estimates with final bill entered")
-            else:
-                k5.metric("Avg Variance (Accuracy)", "-", help="Record final bill amounts in Estimate History to track forecasting variance")
-
-            st.divider()
-
-            # 2. Charts Row
-            c_ch1, c_ch2 = st.columns(2)
-            with c_ch1:
-                st.subheader("Department-wise Estimate Volume")
-                dept_counts: Dict[str, int] = {}
-                for e in all_estimates:
-                    d_name = e.get("department_name") or "Unassigned"
-                    dept_counts[d_name] = dept_counts.get(d_name, 0) + 1
-                df_dept = pd.DataFrame(list(dept_counts.items()), columns=["Department", "Estimates"]).set_index("Department")
-                st.bar_chart(df_dept)
-
-            with c_ch2:
-                st.subheader("Monthly Estimate Trend")
-                month_counts: Dict[str, int] = {}
-                for e in all_estimates:
-                    dt_str = e.get("created_at") or ""
-                    try:
-                        m_key = datetime.fromisoformat(dt_str).strftime("%Y-%m")
-                    except Exception:
-                        m_key = "Other"
-                    month_counts[m_key] = month_counts.get(m_key, 0) + 1
-                sorted_months = sorted(month_counts.keys())
-                df_month = pd.DataFrame([{"Month": m, "Estimates": month_counts[m]} for m in sorted_months]).set_index("Month")
-                st.bar_chart(df_month)
-
-            st.divider()
-
-            # 3. Excel Export & Full Running Ledger
-            col_led_title, col_led_btn = st.columns([3, 2])
-            with col_led_title:
-                st.subheader("Running Estimates Spreadsheet Database")
-            with col_led_btn:
-                excel_rows = []
-                for e in all_estimates:
-                    acc_val = billing.calculate_accuracy(e["total_amount"], e.get("actual_amount"))
-                    acc_text = f"{acc_val:.2f}%" if acc_val is not None else "-"
-                    excel_rows.append({
-                        "Estimate Number": e["estimate_number"],
-                        "Revision Of": e.get("revision_of") or "-",
-                        "Date": format_history_timestamp(e.get("created_at")),
-                        "Patient Name": e["patient_name"],
-                        "UHID": e.get("uhid") or "-",
-                        "Mobile Number": e.get("mobile_number") or "-",
-                        "Department": e.get("department_name") or "-",
-                        "Doctor": e.get("doctor_name") or "-",
-                        "Procedure": e.get("procedure_name") or "-",
-                        "Room Type": e.get("room_type_name") or "-",
-                        "Stay Days": e.get("stay_days", 1),
-                        "Subtotal (₹)": e.get("subtotal", 0),
-                        "Discount %": e.get("discount_pct", 0),
-                        "Discount Amount (₹)": e.get("discount_amount", 0),
-                        "Contingency (₹)": e.get("contingency_amount", 0),
-                        "Tax (₹)": e.get("tax_amount", 0),
-                        "Total Amount (₹)": e.get("total_amount", 0),
-                        "Min Range (₹)": e.get("min_estimate", 0),
-                        "Max Range (₹)": e.get("max_estimate", 0),
-                        "Converted": "Yes" if e.get("converted") == 1 else "No",
-                        "Actual Bill (₹)": e.get("actual_amount") or "-",
-                        "Accuracy Variance (%)": acc_text,
-                        "Remarks": e.get("remarks") or "",
-                    })
-
-                df_export = pd.DataFrame(excel_rows)
-                excel_buffer = io.BytesIO()
-                with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
-                    df_export.to_excel(writer, index=False, sheet_name="Estimates_Database")
-                    ws = writer.sheets["Estimates_Database"]
-                    for col in ws.columns:
-                        col_letter = col[0].column_letter
-                        max_len = max(len(str(cell.value or "")) for cell in col)
-                        ws.column_dimensions[col_letter].width = min(max(max_len + 3, 12), 40)
-
-                st.download_button(
-                    label="Download Spreadsheet Database (.xlsx)",
-                    data=excel_buffer.getvalue(),
-                    file_name=f"Hospital_Estimates_Database_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    width="stretch",
-                    key="btn_download_excel_dashboard",
-                )
-
-            st.dataframe(df_export, width="stretch", hide_index=True)
+        import analytics_dashboard
+        analytics_dashboard.render_enhanced_analytics_dashboard(conn)
 
     # ==========================================================================
     # VIEW 4: ADMIN PORTAL
@@ -1254,6 +1137,7 @@ try:
                 "CSV Import / Export",
                 "Change Password",
                 "Database Backup",
+                "PDF Print Layout",
             ])
 
             # ------------------------------------------------------------------
@@ -1951,6 +1835,13 @@ try:
                         width="stretch",
                         key="btn_download_backup",
                     )
+
+            # ------------------------------------------------------------------
+            # TAB 9: PDF PRINT LAYOUT
+            # ------------------------------------------------------------------
+            with admin_tabs[8]:
+                import pdf_layout
+                pdf_layout.render_pdf_layout_editor_tab(conn)
 
 finally:
     # Ensure SQLite connection is closed at the end of every rerun
