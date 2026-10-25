@@ -325,7 +325,7 @@ def test_pdf_with_comparative_room_columns():
     assert "EST-20261015-0042" in all_text
 
     # Verify ZERO em dashes in generated PDF text and raw bytes
-    assert "—" not in all_text
+    assert chr(0x2014) not in all_text
     assert b"\xe2\x80\x94" not in pdf_bytes
 
 
@@ -347,8 +347,8 @@ def test_zero_emojis_and_zero_em_dashes_in_codebase():
             content = f.read()
 
         # 1. Check for em-dashes
-        em_dash_count = content.count("—")
-        assert em_dash_count == 0, f"{fn} contains {em_dash_count} em dashes ('—')!"
+        em_dash_count = content.count(chr(0x2014))
+        assert em_dash_count == 0, f"{fn} contains {em_dash_count} em dashes!"
 
         # 2. Check for emojis (characters in unicode emoji ranges or pictographs)
         emojis = [c for c in content if ord(c) >= 0x1F300 or (ord(c) > 127 and c not in "₹±")]

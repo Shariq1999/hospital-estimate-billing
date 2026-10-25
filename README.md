@@ -7,7 +7,7 @@ A prototype suitable for internal use on a hospital network for generating patie
 
 ---
 
-## 🏥 Features
+##  Features
 
 ### 1. Reactive Estimation Generator UI (`app.py`)
 - **Cascading Dropdowns (outside `st.form`):** Selecting a department dynamically filters the attending specialists/surgeons and relevant procedures.
@@ -43,7 +43,7 @@ A prototype suitable for internal use on a hospital network for generating patie
 - **Running Excel Spreadsheet Ledger (`openpyxl`):** One-click export of all historical estimates to `.xlsx` format with auto-adjusted column widths and comprehensive clinical and financial data.
 
 ### 6. Flexible Estimate Revision & Price Overrides
-- **Post-Creation Editing:** In `📋 Estimate History`, click **✏️ Revise / Edit Estimate** to load any past record back into the generator with all parameters pre-populated.
+- **Post-Creation Editing:** In ` Estimate History`, click **✏️ Revise / Edit Estimate** to load any past record back into the generator with all parameters pre-populated.
 - **Maximum Tariff Flexibility:** Advanced Price Overrides expander allows modifying any individual line item (room rate, procedure base cost, surgeon fee %, OT, anaesthesia, consumables, diagnostics).
 - **Audit-Safe Revision Chain:** Original records remain archived and immutable; edits save as linked revision records (`-R1`, `-R2`) with `revision_of` pointers.
 
@@ -88,7 +88,7 @@ A prototype suitable for internal use on a hospital network for generating patie
 
 ---
 
-## 🔑 Forgotten Admin Password
+##  Forgotten Admin Password
 
 If the administrator password is lost or forgotten, reset it using the bundled CLI script while the Streamlit application is stopped:
 
@@ -102,7 +102,7 @@ python reset_admin.py
 
 ---
 
-## 📂 Project Architecture
+##  Project Architecture
 
 ```
 Estimation/
@@ -133,7 +133,7 @@ Estimation/
 
 ---
 
-## 🚀 Setup & Execution
+##  Setup & Execution
 
 ### 1. Prerequisites
 - Python 3.10+ (tested on Python 3.14.7 on Windows)
@@ -173,7 +173,7 @@ Open your web browser at `http://localhost:8501`.
 
 ---
 
-## 🧪 Running Automated Tests
+##  Running Automated Tests
 
 Run the full test suite using `pytest`:
 
