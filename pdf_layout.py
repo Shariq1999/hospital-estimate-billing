@@ -16,15 +16,17 @@ import streamlit as st
 
 import billing
 import database
-import pdf_generator
 
 
 DEFAULT_PDF_LAYOUT: Dict[str, Any] = {
     # 1. Hospital Letterhead & Branding
-    "hospital_name": "Sample Multispeciality Hospital",
-    "hospital_subtitle": "NABH & JCI Accredited Tertiary Care Center",
-    "hospital_address": "Plot 12, Health City Road, Sample Nagar, Mumbai - 400 001",
-    "hospital_contact": "Tel: +91 22 0000 0000 | Email: billing@samplehospital.example | GSTIN: 27AAAAA0000A1Z5",
+    # Left blank so printed output is ready for pre-printed hospital stationary paper
+    "hospital_name": "",
+    "hospital_subtitle": "",
+    "hospital_address": "",
+    "hospital_contact": "",
+    "show_hospital_letterhead": True,
+    "letterhead_blank_space_mm": 40.0,
     "header_alignment": "LEFT",  # "LEFT", "CENTER", "RIGHT"
     "primary_color": "#1A365D",  # Deep Navy
     "secondary_color": "#2B6CB0",
@@ -46,7 +48,7 @@ DEFAULT_PDF_LAYOUT: Dict[str, Any] = {
     "table_font_size": 8.5,
 
     # 3. Metadata & Section Visibility Toggles
-    "show_letterhead_placeholder": True,
+    "show_letterhead_placeholder": False,
     "show_patient_uhid_mobile": True,
     "show_attending_doctor": True,
     "show_validity_date": True,
@@ -236,24 +238,46 @@ def render_pdf_layout_editor_tab(conn: sqlite3.Connection) -> None:
     with col_editor:
         with st.form("pdf_layout_editor_form"):
             st.write("##### 1. Hospital Letterhead & Branding")
+            st.caption(
+                "When printing onto pre-printed stationery paper, leave these fields blank "
+                "or disable 'Print Hospital Letterhead' to prevent overlapping physical letterhead."
+            )
+            c_lh1, c_lh2 = st.columns(2)
+            with c_lh1:
+                print_letterhead = st.checkbox(
+                    "Print Hospital Letterhead Header",
+                    value=bool(current_config.get("show_hospital_letterhead", False)),
+                    key="cfg_show_letterhead",
+                    help="Enable only if printing onto plain white paper without pre-printed stationery.",
+                )
+            with c_lh2:
+                blank_spacing = st.number_input(
+                    "Top Blank Space for Pre-printed Stationery (mm)",
+                    min_value=0.0,
+                    max_value=120.0,
+                    value=float(current_config.get("letterhead_blank_space_mm", 40.0)),
+                    step=5.0,
+                    key="cfg_blank_spacing",
+                    help="Vertical blank space reserved for physical letterhead at top of page.",
+                )
             h_name = st.text_input(
                 "Hospital / Clinic Name",
-                value=current_config.get("hospital_name", DEFAULT_PDF_LAYOUT["hospital_name"]),
+                value=current_config.get("hospital_name", ""),
                 key="cfg_hospital_name",
             )
             h_subtitle = st.text_input(
                 "Hospital Subtitle / Accreditation Line",
-                value=current_config.get("hospital_subtitle", DEFAULT_PDF_LAYOUT["hospital_subtitle"]),
+                value=current_config.get("hospital_subtitle", ""),
                 key="cfg_hospital_subtitle",
             )
             h_address = st.text_input(
                 "Address Line",
-                value=current_config.get("hospital_address", DEFAULT_PDF_LAYOUT["hospital_address"]),
+                value=current_config.get("hospital_address", ""),
                 key="cfg_hospital_address",
             )
             h_contact = st.text_input(
                 "Contact Line (Phone, Email, GSTIN)",
-                value=current_config.get("hospital_contact", DEFAULT_PDF_LAYOUT["hospital_contact"]),
+                value=current_config.get("hospital_contact", ""),
                 key="cfg_hospital_contact",
             )
 
@@ -349,7 +373,7 @@ def render_pdf_layout_editor_tab(conn: sqlite3.Connection) -> None:
             with c_tog1:
                 show_letterhead_placeholder = st.checkbox(
                     "Show Letterhead / Logo Placeholder",
-                    value=bool(current_config.get("show_letterhead_placeholder", True)),
+                    value=bool(current_config.get("show_letterhead_placeholder", False)),
                     key="cfg_show_letterhead_placeholder",
                 )
                 show_patient_uhid_mobile = st.checkbox(
@@ -490,10 +514,12 @@ def render_pdf_layout_editor_tab(conn: sqlite3.Connection) -> None:
 
             if submitted:
                 new_layout = {
-                    "hospital_name": h_name.strip() or DEFAULT_PDF_LAYOUT["hospital_name"],
+                    "hospital_name": h_name.strip(),
                     "hospital_subtitle": h_subtitle.strip(),
                     "hospital_address": h_address.strip(),
                     "hospital_contact": h_contact.strip(),
+                    "show_hospital_letterhead": print_letterhead,
+                    "letterhead_blank_space_mm": float(blank_spacing),
                     "header_alignment": h_align,
                     "primary_color": primary_color,
                     "secondary_color": table_header_bg,
@@ -566,6 +592,7 @@ def render_pdf_layout_editor_tab(conn: sqlite3.Connection) -> None:
             sample_snapshot = create_sample_estimate_snapshot()
 
         try:
+            import pdf_generator
             sample_pdf_bytes = pdf_generator.generate_estimate_pdf(
                 sample_snapshot,
                 is_draft=False,

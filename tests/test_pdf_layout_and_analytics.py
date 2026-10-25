@@ -450,3 +450,27 @@ def test_analytics_excel_export_generation():
     ws3 = wb["3_Department_Summary"]
     assert ws3.cell(row=1, column=1).value == "Department"
     assert ws3.cell(row=2, column=1).value == "General Surgery"
+
+
+def test_pdf_preprinted_letterhead_blank_space_and_date_line():
+    """Verify that default PDF layout leaves letterhead blank for pre-printed stationary."""
+    sample_snapshot = create_sample_estimate_snapshot()
+
+    # Generate with default blank layout
+    pdf_bytes = pdf_generator.generate_estimate_pdf(
+        sample_snapshot,
+        is_draft=False,
+        layout_config=DEFAULT_PDF_LAYOUT,
+    )
+    assert len(pdf_bytes) > 1000
+    assert pdf_bytes.startswith(b"%PDF-")
+
+    pdf_text = _extract_pdf_text(pdf_bytes)
+    # Hospital branding must be absent
+    assert "Sample Multispeciality Hospital" not in pdf_text
+    assert "Plot 12, Health City Road" not in pdf_text
+    # Essential proposal title and date line must be present
+    assert "ESTIMATED HOSPITAL TARIFF & BILLING PROPOSAL" in pdf_text
+    assert "ESTIMATE DATE:" in pdf_text
+    assert "VALID UNTIL:" in pdf_text
+    assert "Rajesh Kumar" in pdf_text

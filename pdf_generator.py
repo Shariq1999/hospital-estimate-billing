@@ -78,6 +78,8 @@ def generate_estimate_pdf(
     else:
         data = estimate_data
 
+    meta = data.get("metadata", {})
+
     # Resolve layout configuration
     if layout_config:
         layout = get_merged_layout(layout_config)
@@ -85,8 +87,10 @@ def generate_estimate_pdf(
         layout = get_merged_layout(data.get("pdf_layout_snapshot"))
     else:
         layout = dict(DEFAULT_PDF_LAYOUT)
+        if meta.get("hospital_name") and not layout.get("hospital_name"):
+            layout["hospital_name"] = meta.get("hospital_name")
+            layout["show_hospital_letterhead"] = True
 
-    meta = data.get("metadata", {})
     est_num = meta.get("estimate_number") or ""
     validity_days = int(meta.get("validity_days", 15))
     created_at = meta.get("created_at") or data.get("patient", {}).get("created_at")
@@ -250,72 +254,82 @@ def generate_estimate_pdf(
     fin = data.get("financials", {})
     line_items = data.get("line_items", [])
 
-    h_name = xml_escape(str(layout.get("hospital_name") or meta.get("hospital_name") or "Sample Multispeciality Hospital"))
+    h_name = xml_escape(str(layout.get("hospital_name") or ""))
     h_sub = xml_escape(str(layout.get("hospital_subtitle") or ""))
-    h_addr = xml_escape(str(layout.get("hospital_address") or meta.get("hospital_address") or ""))
-    h_contact = xml_escape(str(layout.get("hospital_contact") or f"Tel: {meta.get('hospital_phone', '')} | Email: {meta.get('hospital_email', '')}"))
+    h_addr = xml_escape(str(layout.get("hospital_address") or ""))
+    h_contact = xml_escape(str(layout.get("hospital_contact") or ""))
 
-    # 1. Header Section - Letterhead Placeholder (if toggled)
-    if layout.get("show_letterhead_placeholder", True):
-        placeholder_box = Table(
-            [[Paragraph("[ HOSPITAL LETTERHEAD / LOGO PLACEHOLDER ]", style_letterhead_placeholder)]],
-            colWidths=[content_width],
-        )
-        placeholder_box.setStyle(
+    # Pre-printed stationery support:
+    # If hospital_name is empty or show_hospital_letterhead is disabled, leave blank space for physical letterhead
+    should_print_letterhead = bool(h_name) and bool(layout.get("show_hospital_letterhead", True))
+    blank_space_mm = float(layout.get("letterhead_blank_space_mm", 40.0))
+
+    if should_print_letterhead:
+        # 1. Header Section - Letterhead Placeholder (if toggled)
+        if layout.get("show_letterhead_placeholder", False):
+            placeholder_box = Table(
+                [[Paragraph("[ HOSPITAL LETTERHEAD / LOGO PLACEHOLDER ]", style_letterhead_placeholder)]],
+                colWidths=[content_width],
+            )
+            placeholder_box.setStyle(
+                TableStyle(
+                    [
+                        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F7FAFC")),
+                        ("BOX", (0, 0), (-1, -1), 0.8, colors.HexColor("#CBD5E0")),
+                        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                        ("TOPPADDING", (0, 0), (-1, -1), 5),
+                        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                    ]
+                )
+            )
+            story.append(placeholder_box)
+            story.append(Spacer(1, 4 * mm))
+
+        # Header details table
+        header_w_left = content_width * 0.65
+        header_w_right = content_width * 0.35
+
+        date_block = f"<b>ESTIMATE DATE:</b> {created_str}"
+        if layout.get("show_validity_date", True):
+            date_block += f"<br/><b>VALID UNTIL:</b> {valid_until_str}"
+
+        sub_parts = []
+        if h_sub:
+            sub_parts.append(f"<i>{h_sub}</i>")
+        if h_addr:
+            sub_parts.append(h_addr)
+        if h_contact:
+            sub_parts.append(h_contact)
+        sub_text = "<br/>".join(sub_parts)
+
+        header_data = [
+            [
+                Paragraph(f"<b>{h_name}</b>", style_h1),
+                Paragraph(date_block, style_cell_right),
+            ],
+            [
+                Paragraph(sub_text, style_sub),
+                "",
+            ],
+        ]
+        header_table = Table(header_data, colWidths=[header_w_left, header_w_right])
+        header_table.setStyle(
             TableStyle(
                 [
-                    ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F7FAFC")),
-                    ("BOX", (0, 0), (-1, -1), 0.8, colors.HexColor("#CBD5E0")),
-                    ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-                    ("TOPPADDING", (0, 0), (-1, -1), 5),
-                    ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("SPAN", (0, 1), (1, 1)),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+                    ("TOPPADDING", (0, 0), (-1, -1), 0),
                 ]
             )
         )
-        story.append(placeholder_box)
-        story.append(Spacer(1, 4 * mm))
-
-    # Header details table
-    header_w_left = content_width * 0.65
-    header_w_right = content_width * 0.35
-
-    date_block = f"<b>ESTIMATE DATE:</b> {created_str}"
-    if layout.get("show_validity_date", True):
-        date_block += f"<br/><b>VALID UNTIL:</b> {valid_until_str}"
-
-    sub_parts = []
-    if h_sub:
-        sub_parts.append(f"<i>{h_sub}</i>")
-    if h_addr:
-        sub_parts.append(h_addr)
-    if h_contact:
-        sub_parts.append(h_contact)
-    sub_text = "<br/>".join(sub_parts)
-
-    header_data = [
-        [
-            Paragraph(f"<b>{h_name}</b>", style_h1),
-            Paragraph(date_block, style_cell_right),
-        ],
-        [
-            Paragraph(sub_text, style_sub),
-            "",
-        ],
-    ]
-    header_table = Table(header_data, colWidths=[header_w_left, header_w_right])
-    header_table.setStyle(
-        TableStyle(
-            [
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("SPAN", (0, 1), (1, 1)),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
-                ("TOPPADDING", (0, 0), (-1, -1), 0),
-            ]
-        )
-    )
-    story.append(header_table)
-    story.append(Spacer(1, 3 * mm))
-    story.append(HRFlowable(width="100%", thickness=1.5, color=secondary_color, spaceAfter=8))
+        story.append(header_table)
+        story.append(Spacer(1, 3 * mm))
+        story.append(HRFlowable(width="100%", thickness=1.5, color=secondary_color, spaceAfter=8))
+    else:
+        # Pre-printed letterhead mode: Leave top blank space for physical letterhead stationery
+        if blank_space_mm > 0:
+            story.append(Spacer(1, blank_space_mm * mm))
 
     # 2. Document Title / Draft Banner
     proposal_title = xml_escape(str(layout.get("table_title_text") or "ESTIMATED HOSPITAL TARIFF & BILLING PROPOSAL"))
@@ -330,7 +344,25 @@ def generate_estimate_pdf(
         doc_header_text = f"{proposal_title} - {est_num}"
 
     story.append(Paragraph(f"<b>{doc_header_text}</b>", style_title))
-    story.append(Spacer(1, 4 * mm))
+
+    if not should_print_letterhead:
+        style_date_line = ParagraphStyle(
+            "DateLineSub",
+            parent=styles["Normal"],
+            fontName=BOLD_FONT_NAME,
+            fontSize=body_fs,
+            leading=body_fs + 3.5,
+            textColor=colors.HexColor("#4A5568"),
+            alignment=1,  # Center
+        )
+        date_line_text = f"ESTIMATE DATE: {created_str}"
+        if layout.get("show_validity_date", True):
+            date_line_text += f" &nbsp; | &nbsp; VALID UNTIL: {valid_until_str}"
+        story.append(Spacer(1, 1.5 * mm))
+        story.append(Paragraph(date_line_text, style_date_line))
+        story.append(Spacer(1, 4 * mm))
+    else:
+        story.append(Spacer(1, 4 * mm))
 
     # 3. Patient & Clinical Metadata Grid
     p_name = xml_escape(str(patient.get("name", "N/A")))
