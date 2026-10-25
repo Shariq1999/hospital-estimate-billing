@@ -62,6 +62,13 @@ DB_PATH = os.environ.get("HOSPITAL_DB_PATH", "hospital.db")
 @st.cache_resource
 def ensure_db_initialized(path: str = DB_PATH):
     """Initialize database schema, seed data, and default admin credentials once (cached)."""
+    # Attempt cloud restore if database is empty or missing on cold boot
+    try:
+        import persistence
+        persistence.restore_db_from_cloud(path)
+    except Exception:
+        pass
+
     init_conn = database.get_connection(path)
     try:
         database.init_db(init_conn)

@@ -238,6 +238,18 @@ def ensure_default_admin(conn: sqlite3.Connection) -> None:
         set_admin_password(conn, DEFAULT_ADMIN_USERNAME, DEFAULT_ADMIN_PASSWORD)
 
 
+def _notify_db_write(conn: sqlite3.Connection) -> None:
+    """Notify cloud persistence hook that a database write has committed."""
+    try:
+        row = conn.execute("PRAGMA database_list").fetchone()
+        file_path = (row["file"] if isinstance(row, sqlite3.Row) else row[2]) if row else None
+        if file_path:
+            import persistence
+            persistence.trigger_cloud_sync_background(file_path)
+    except Exception:
+        pass
+
+
 def set_admin_password(conn: sqlite3.Connection, username: str, password: str) -> None:
     """Set or update an admin account with salted PBKDF2 hash."""
     pwd_hash, salt = hash_password(password)
@@ -254,6 +266,7 @@ def set_admin_password(conn: sqlite3.Connection, username: str, password: str) -
             """,
             (username, pwd_hash, salt, now),
         )
+    _notify_db_write(conn)
 
 
 def verify_admin_credentials(conn: sqlite3.Connection, username: str, password: str) -> bool:
@@ -298,15 +311,18 @@ def save_department(conn: sqlite3.Connection, name: str, dept_id: Optional[int] 
     with conn:
         if dept_id:
             conn.execute("UPDATE departments SET name = ? WHERE id = ?", (clean_name, dept_id))
-            return dept_id
+            res_id = dept_id
         else:
             cur = conn.execute("INSERT INTO departments (name, is_active) VALUES (?, 1)", (clean_name,))
-            return cur.lastrowid
+            res_id = cur.lastrowid
+    _notify_db_write(conn)
+    return res_id
 
 
 def toggle_department_status(conn: sqlite3.Connection, dept_id: int, is_active: int) -> None:
     with conn:
         conn.execute("UPDATE departments SET is_active = ? WHERE id = ?", (is_active, dept_id))
+    _notify_db_write(conn)
 
 
 # --- Room Types ---
@@ -344,18 +360,21 @@ def save_room_type(
                 "UPDATE room_types SET name = ?, daily_rate = ?, description = ? WHERE id = ?",
                 (clean_name, daily_rate, description.strip(), room_id),
             )
-            return room_id
+            res_id = room_id
         else:
             cur = conn.execute(
                 "INSERT INTO room_types (name, daily_rate, description, is_active) VALUES (?, ?, ?, 1)",
                 (clean_name, daily_rate, description.strip()),
             )
-            return cur.lastrowid
+            res_id = cur.lastrowid
+    _notify_db_write(conn)
+    return res_id
 
 
 def toggle_room_type_status(conn: sqlite3.Connection, room_id: int, is_active: int) -> None:
     with conn:
         conn.execute("UPDATE room_types SET is_active = ? WHERE id = ?", (is_active, room_id))
+    _notify_db_write(conn)
 
 
 # --- Doctors ---
@@ -427,7 +446,7 @@ def save_doctor(
                 """,
                 (clean_name, department_id, consultation_fee, surgeon_fee_pct, surgeon_fee_type, surgeon_fee_amount, specialization.strip(), doc_id),
             )
-            return doc_id
+            res_id = doc_id
         else:
             cur = conn.execute(
                 """
@@ -436,12 +455,15 @@ def save_doctor(
                 """,
                 (clean_name, department_id, consultation_fee, surgeon_fee_pct, surgeon_fee_type, surgeon_fee_amount, specialization.strip()),
             )
-            return cur.lastrowid
+            res_id = cur.lastrowid
+    _notify_db_write(conn)
+    return res_id
 
 
 def toggle_doctor_status(conn: sqlite3.Connection, doc_id: int, is_active: int) -> None:
     with conn:
         conn.execute("UPDATE doctors SET is_active = ? WHERE id = ?", (is_active, doc_id))
+    _notify_db_write(conn)
 
 
 # --- Procedures ---
@@ -519,7 +541,7 @@ def save_procedure(
                     investigations_charge, default_stay_days, proc_id
                 ),
             )
-            return proc_id
+            res_id = proc_id
         else:
             cur = conn.execute(
                 """
@@ -534,12 +556,15 @@ def save_procedure(
                     investigations_charge, default_stay_days
                 ),
             )
-            return cur.lastrowid
+            res_id = cur.lastrowid
+    _notify_db_write(conn)
+    return res_id
 
 
 def toggle_procedure_status(conn: sqlite3.Connection, proc_id: int, is_active: int) -> None:
     with conn:
         conn.execute("UPDATE procedures SET is_active = ? WHERE id = ?", (is_active, proc_id))
+    _notify_db_write(conn)
 
 
 # ==============================================================================
@@ -559,12 +584,14 @@ def get_setting(conn: sqlite3.Connection, key: str, default: str = "") -> str:
 def update_setting(conn: sqlite3.Connection, key: str, value: str) -> None:
     with conn:
         conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
+    _notify_db_write(conn)
 
 
 def update_settings(conn: sqlite3.Connection, settings_dict: Dict[str, str]) -> None:
     with conn:
         for k, v in settings_dict.items():
             conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (k, str(v)))
+    _notify_db_write(conn)
 
 
 # ==============================================================================
@@ -603,6 +630,7 @@ def save_pdf_layout(conn: sqlite3.Connection, config: Dict[str, Any]) -> None:
             """,
             (config_json, now),
         )
+    _notify_db_write(conn)
 
 
 def reset_pdf_layout(conn: sqlite3.Connection) -> Dict[str, Any]:
@@ -682,6 +710,7 @@ def save_estimate(conn: sqlite3.Connection, est: Dict[str, Any]) -> str:
                 est.get("revision_of"),
             ),
         )
+    _notify_db_write(conn)
     return estimate_number
 
 
@@ -701,6 +730,7 @@ def update_estimate_outcome(
             """,
             (1 if converted else 0, actual_amount or None, estimate_number),
         )
+    _notify_db_write(conn)
 
 
 def get_next_revision_number(conn: sqlite3.Connection, base_est_num: str) -> str:
@@ -887,6 +917,7 @@ def import_departments_csv(conn: sqlite3.Connection, csv_data: str | bytes) -> T
                     (name, active_val),
                 )
                 inserted += 1
+    _notify_db_write(conn)
     return inserted, updated
 
 
@@ -961,6 +992,7 @@ def import_room_types_csv(conn: sqlite3.Connection, csv_data: str | bytes) -> Tu
                     (name, rate, desc, active_val),
                 )
                 inserted += 1
+    _notify_db_write(conn)
     return inserted, updated
 
 
@@ -1061,6 +1093,7 @@ def import_doctors_csv(conn: sqlite3.Connection, csv_data: str | bytes) -> Tuple
                     (name, dept_id, fee, pct, spec, active_val),
                 )
                 inserted += 1
+    _notify_db_write(conn)
     return inserted, updated
 
 
@@ -1183,4 +1216,5 @@ def import_procedures_csv(conn: sqlite3.Connection, csv_data: str | bytes) -> Tu
                     (name, dept_id, base, ot, anaes, cons, inv, stay, active_val),
                 )
                 inserted += 1
+    _notify_db_write(conn)
     return inserted, updated

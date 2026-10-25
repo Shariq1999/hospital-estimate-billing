@@ -536,11 +536,21 @@ def render_pdf_layout_editor_tab(conn: sqlite3.Connection) -> None:
                     "right_signatory_dept": right_sig_dept.strip() or DEFAULT_PDF_LAYOUT["right_signatory_dept"],
                 }
                 database.save_pdf_layout(conn, new_layout)
+                try:
+                    import persistence
+                    persistence.trigger_cloud_sync_background(database.DB_FILE)
+                except Exception:
+                    pass
                 st.success("PDF Layout template successfully updated.")
                 st.rerun()
 
         if st.button("Reset to Factory Defaults", key="btn_reset_pdf_layout", width="stretch"):
             database.reset_pdf_layout(conn)
+            try:
+                import persistence
+                persistence.trigger_cloud_sync_background(database.DB_FILE)
+            except Exception:
+                pass
             st.success("PDF Layout template reset to factory defaults.")
             st.rerun()
 
